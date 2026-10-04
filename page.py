@@ -6,31 +6,32 @@ import json
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Optional
-from urllib.parse import urlparse
-
 import httpx
 
 try:
     from .images import (
+        CANDIDATES_PER_PAGE,
         FetchedImage,
-        ImageFetchError,
+        FetchPolicy,
+        download_candidate_images,
         download_public,
         image_urls_in_document,
         is_html,
+        make_policy,
         sniff_image,
     )
 except ImportError:
     from images import (
+        CANDIDATES_PER_PAGE,
         FetchedImage,
-        ImageFetchError,
+        FetchPolicy,
+        download_candidate_images,
         download_public,
         image_urls_in_document,
         is_html,
+        make_policy,
         sniff_image,
     )
-
-
-TEXT_CANDIDATES = 6
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ async def read_public_page(
     client: httpx.AsyncClient,
     url: str,
     *,
+    policy: Optional[FetchPolicy] = None,
     resolver=None,
     blocked_ips=None,
     allow_unresolved: bool = False,
@@ -148,34 +150,23 @@ async def read_public_page(
 ) -> PageRead:
     """打开一个公开地址，读取正文并下载其中的图片。"""
 
-    options = dict(
+    active = policy or make_policy(
         resolver=resolver,
         blocked_ips=blocked_ips,
         allow_unresolved=allow_unresolved,
         check_peer=check_peer,
+        max_images=max_images,
         max_image_bytes=max_image_bytes,
     )
-    data, content_type, final = await download_public(client, url, **options)
+    data, content_type, final = await download_public(client, url, policy=active)
     mime = sniff_image(data)
     if mime:
         return PageRead(final, "", "", [FetchedImage(data, mime, final)], [])
     title, text = page_text(data, content_type, text_limit)
     images: list[FetchedImage] = []
     notes: list[str] = []
-    if not is_html(data, content_type):
-        return PageRead(final, title, text, images, notes)
-    document = data.decode("utf-8", "replace")
-    for candidate in image_urls_in_document(document, final, TEXT_CANDIDATES):
-        if len(images) >= max_images:
-            break
-        try:
-            image_data, image_type, image_url = await download_public(client, candidate, **options)
-        except ImageFetchError as exc:
-            notes.append(f"{urlparse(candidate).hostname or '图片'}：{exc}")
-            continue
-        image_mime = sniff_image(image_data)
-        if not image_mime or is_html(image_data, image_type):
-            notes.append(f"{urlparse(candidate).hostname or '图片'}：不是支持的图片")
-            continue
-        images.append(FetchedImage(image_data, image_mime, image_url))
+    if is_html(data, content_type):
+        document = data.decode("utf-8", "replace")
+        candidates = image_urls_in_document(document, final, CANDIDATES_PER_PAGE)
+        await download_candidate_images(client, candidates, active, images, notes)
     return PageRead(final, title, text, images, notes)

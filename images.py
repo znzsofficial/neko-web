@@ -20,7 +20,7 @@ MAX_REDIRECTS = 3
 CANDIDATES_PER_PAGE = 6
 PAGE_BYTES = 1_500_000
 IMAGE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; MaiBotAnySearch/0.3)",
+    "User-Agent": "Mozilla/5.0 (compatible; NekoWeb/1.0)",
     "Accept": "image/webp,image/png,image/jpeg,image/gif,text/html;q=0.9,*/*;q=0.5",
 }
 
@@ -226,10 +226,50 @@ def _peer_is_blocked(response: httpx.Response, blocked_ips: set[str]) -> bool:
     return peer in blocked_ips or not is_public_ip(peer)
 
 
+@dataclass(frozen=True)
+class FetchPolicy:
+    """一次公网下载共用的限制。读正文和取图走同一份。"""
+
+    resolver: Resolver
+    blocked_ips: frozenset[str]
+    allow_unresolved: bool
+    check_peer: bool
+    max_images: int = 4
+    max_image_bytes: int = 8 * 1024 * 1024
+
+
+def make_policy(
+    *,
+    resolver: Optional[Resolver] = None,
+    blocked_ips: Optional[Iterable[str]] = None,
+    allow_unresolved: bool = False,
+    check_peer: bool = True,
+    max_images: int = 4,
+    max_image_bytes: int = 8 * 1024 * 1024,
+) -> FetchPolicy:
+    return FetchPolicy(
+        resolver=resolver or default_resolver,
+        blocked_ips=frozenset(blocked_ips or ()),
+        allow_unresolved=allow_unresolved,
+        check_peer=check_peer,
+        max_images=max_images,
+        max_image_bytes=max_image_bytes,
+    )
+
+
+class HtmlPage(Exception):
+    """下载到的是网页，不是图片。"""
+
+    def __init__(self, data: bytes, final: str) -> None:
+        self.data = data
+        self.final = final
+
+
 async def download_public(
     client: httpx.AsyncClient,
     url: str,
     *,
+    policy: Optional[FetchPolicy] = None,
     resolver: Optional[Resolver] = None,
     blocked_ips: Optional[set[str]] = None,
     allow_unresolved: bool = False,
@@ -238,26 +278,20 @@ async def download_public(
 ) -> tuple[bytes, str, str]:
     """下载一个公开地址。返回正文、Content-Type 和最终地址。"""
 
-    return await _load(
-        client,
-        url,
-        resolver=resolver or default_resolver,
-        blocked_ips=blocked_ips or set(),
+    active = policy or make_policy(
+        resolver=resolver,
+        blocked_ips=blocked_ips,
         allow_unresolved=allow_unresolved,
         check_peer=check_peer,
         max_image_bytes=max_image_bytes,
     )
+    return await _load(client, url, active)
 
 
 async def _load(
     client: httpx.AsyncClient,
     url: str,
-    *,
-    resolver: Resolver,
-    blocked_ips: set[str],
-    allow_unresolved: bool,
-    check_peer: bool,
-    max_image_bytes: int,
+    policy: FetchPolicy,
 ) -> tuple[bytes, str, str]:
     current = url.strip()
     for _ in range(MAX_REDIRECTS + 1):
@@ -270,25 +304,25 @@ async def _load(
         except ValueError:
             literal = None
         if literal is not None:
-            _check_targets(host, [str(literal)], blocked_ips)
+            _check_targets(host, [str(literal)], set(policy.blocked_ips))
         else:
             try:
-                ips = resolver(host)
+                ips = policy.resolver(host)
             except ImageFetchError:
-                if not allow_unresolved:
+                if not policy.allow_unresolved:
                     raise
                 ips = []
             except OSError as exc:
-                if not allow_unresolved:
+                if not policy.allow_unresolved:
                     raise ImageFetchError("无法解析域名") from exc
                 ips = []
             if ips:
-                _check_targets(host, ips, blocked_ips)
-            elif not allow_unresolved:
+                _check_targets(host, ips, set(policy.blocked_ips))
+            elif not policy.allow_unresolved:
                 raise ImageFetchError("无法解析域名")
         try:
             async with client.stream("GET", current) as response:
-                if check_peer and _peer_is_blocked(response, blocked_ips):
+                if policy.check_peer and _peer_is_blocked(response, set(policy.blocked_ips)):
                     raise ImageFetchError("不能获取内网或本机地址")
                 if response.status_code in {301, 302, 303, 307, 308}:
                     location = response.headers.get("location") or ""
@@ -299,7 +333,7 @@ async def _load(
                 if response.status_code != 200:
                     raise ImageFetchError(f"HTTP {response.status_code}")
                 content_type = response.headers.get("content-type") or ""
-                data = await _read_limited(response, _body_limit(content_type, max_image_bytes))
+                data = await _read_limited(response, _body_limit(content_type, policy.max_image_bytes))
                 return data, content_type, str(response.url)
         except ImageFetchError:
             raise
@@ -320,10 +354,46 @@ def is_html(data: bytes, content_type: str) -> bool:
     return sample.startswith((b"<!doctype html", b"<html")) or b"<img" in sample or b"og:image" in sample
 
 
+async def load_image(client: httpx.AsyncClient, url: str, policy: FetchPolicy) -> FetchedImage:
+    """下载一张图片。网页交给调用方处理。"""
+
+    data, content_type, final = await _load(client, url, policy)
+    mime = sniff_image(data)
+    if mime:
+        return FetchedImage(data, mime, final)
+    if is_html(data, content_type):
+        raise HtmlPage(data, final)
+    raise ImageFetchError("不是支持的图片")
+
+
+async def download_candidate_images(
+    client: httpx.AsyncClient,
+    candidates: list[str],
+    policy: FetchPolicy,
+    images: list[FetchedImage],
+    notes: list[str],
+) -> bool:
+    """按候选地址补图，直到达到数量上限。返回是否至少成功一张。"""
+
+    found = False
+    for candidate in candidates:
+        if len(images) >= policy.max_images:
+            break
+        try:
+            images.append(await load_image(client, candidate, policy))
+            found = True
+        except HtmlPage:
+            notes.append(f"{urlparse(candidate).hostname or '图片'}：打开后仍是网页")
+        except ImageFetchError as exc:
+            notes.append(f"{urlparse(candidate).hostname or '图片'}：{exc}")
+    return found
+
+
 async def collect_images(
     client: httpx.AsyncClient,
     urls: list[str],
     *,
+    policy: Optional[FetchPolicy] = None,
     resolver: Optional[Resolver] = None,
     blocked_ips: Optional[set[str]] = None,
     allow_unresolved: bool = False,
@@ -333,59 +403,30 @@ async def collect_images(
 ) -> tuple[list[FetchedImage], list[str]]:
     """按顺序下载图片。网页只取 og:image 和少量 img，不再往下翻页。"""
 
-    lookup = resolver or default_resolver
-    blocked = blocked_ips or set()
+    active = policy or make_policy(
+        resolver=resolver,
+        blocked_ips=blocked_ips,
+        allow_unresolved=allow_unresolved,
+        check_peer=check_peer,
+        max_images=max_images,
+        max_image_bytes=max_image_bytes,
+    )
     images: list[FetchedImage] = []
     notes: list[str] = []
-
-    async def one(target: str) -> FetchedImage:
-        data, content_type, final = await _load(
-            client,
-            target,
-            resolver=lookup,
-            blocked_ips=blocked,
-            allow_unresolved=allow_unresolved,
-            check_peer=check_peer,
-            max_image_bytes=max_image_bytes,
-        )
-        mime = sniff_image(data)
-        if mime:
-            return FetchedImage(data, mime, final)
-        if is_html(data, content_type):
-            raise _HtmlPage(data, final)
-        raise ImageFetchError("不是支持的图片")
-
     for url in urls:
-        if len(images) >= max_images:
+        if len(images) >= active.max_images:
             break
         try:
-            images.append(await one(url))
-        except _HtmlPage as page:
+            images.append(await load_image(client, url, active))
+        except HtmlPage as page:
             candidates = image_urls_in_document(
                 page.data.decode("utf-8", "replace"), page.final, CANDIDATES_PER_PAGE
             )
             if not candidates:
                 notes.append(f"{urlparse(url).hostname or '页面'}：没有可发送的图片")
                 continue
-            found = False
-            for candidate in candidates:
-                if len(images) >= max_images:
-                    break
-                try:
-                    images.append(await one(candidate))
-                    found = True
-                except _HtmlPage:
-                    notes.append(f"{urlparse(candidate).hostname or '图片'}：打开后仍是网页")
-                except ImageFetchError as exc:
-                    notes.append(f"{urlparse(candidate).hostname or '图片'}：{exc}")
-            if not found:
+            if not await download_candidate_images(client, candidates, active, images, notes):
                 notes.append(f"{urlparse(page.final).hostname or '页面'}：图片都没能下载")
         except ImageFetchError as exc:
             notes.append(f"{urlparse(url).hostname or '地址'}：{exc}")
     return images, notes
-
-
-class _HtmlPage(Exception):
-    def __init__(self, data: bytes, final: str) -> None:
-        self.data = data
-        self.final = final

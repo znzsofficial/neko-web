@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "neko.web",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Neko 联网",
   "description": "搜索公开网页，打开链接读取正文，并把页面里的图片发到当前聊天。",
   "author": {
