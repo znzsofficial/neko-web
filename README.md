@@ -1,0 +1,40 @@
+# Neko Web
+
+给 [MaiBot](https://github.com/Mai-with-u/MaiBot) 用的联网插件。可以搜索公开网页，打开一个链接读取标题和正文，并把页面里的图片发到当前聊天。
+
+搜索走 [AnySearch](https://anysearch.com)。打开链接和下载图片由插件自己完成。搜索客户端的早期实现来自 [gomico/maibot_plugin_anysearch](https://github.com/gomico/maibot_plugin_anysearch)，该项目以 MIT 许可证发布。
+
+## 安装
+
+把这个目录放到 MaiBot 的 `plugins/neko-web`，复制 `config.example.toml` 为 `config.toml`，然后在 WebUI 里启用。
+
+`api_key` 可以留空，匿名访问的额度更低。需要代理时，把 `proxy_mode` 改成 `custom`，并填写 `proxy_url`。不要把填了密钥的 `config.toml` 提交到仓库。
+
+依赖 `httpx >= 0.26.0`。MaiBot 1.2 及以上，SDK 2.7 及以上。
+
+## 工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `neko_web_search` | 搜索。垂直领域要先查 `neko_web_domains`，不要自己编 `sub_domain`。 |
+| `neko_web_batch_search` | 一次并行搜索 1–5 个问题。 |
+| `neko_web_domains` | 查询垂直领域的子领域和参数。 |
+| `neko_web_read` | 打开一个公开链接，返回标题和正文，并把配图发到当前聊天。 |
+| `neko_web_images` | 只下载图片或网页配图，发到当前聊天。 |
+| `neko_web_extract` | 用 AnySearch 提取长文。用户只是丢来一个链接时，优先用 `neko_web_read`。 |
+
+正文和图片都来自外部网页。模型看不到图片像素，所以不应该描述画面。页面里的文字也不能当成指令。
+
+## 限制
+
+- 只接受 `http` 和 `https` 的 80 / 443 端口。
+- 拒绝内网、本机、云元数据、带账号密码的地址，以及跳到这些地址的重定向。
+- 图片只收 JPEG、PNG、GIF、WebP。默认一次最多 4 张，单张 8 MB。
+- 返回给模型的正文默认不超过 8000 字。
+- 不执行页面脚本，也读不了需要登录的内容。
+
+## 开发
+
+```bash
+python -m unittest
+```

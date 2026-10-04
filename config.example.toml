@@ -1,0 +1,28 @@
+[plugin]
+enabled = false
+config_version = "1.0.0"
+
+[web]
+# AnySearch API Key（可选；留空使用匿名访问）
+api_key = ""
+
+# 单次请求超时时间（秒）
+timeout_seconds = 30
+
+# 搜索默认返回条数，范围 1-10
+default_max_results = 5
+
+# 代理模式：none（不使用代理）、system（使用系统代理）、custom（使用下方代理地址）
+proxy_mode = "none"
+
+# 自定义代理地址，仅在 proxy_mode = "custom" 时生效
+proxy_url = ""
+
+# 一次最多发送的网络图片数量，范围 1-4
+max_images = 4
+
+# 单张网络图片的大小上限，单位 MB，范围 1-8
+max_image_megabytes = 8
+
+# 打开网页时返回的正文上限
+max_text_chars = 8000
