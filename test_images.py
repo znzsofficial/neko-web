@@ -64,7 +64,7 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         seen: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            seen.append(request.url.host)
+            seen.append(request.headers['host'])
             return httpx.Response(302, headers={"location": "http://127.0.0.1/secret.png"})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False) as client:
@@ -75,7 +75,7 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_page_og_image_is_downloaded(self):
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.host == "news.test":
+            if request.headers['host'] == "news.test":
                 html = b'<meta property="og:image" content="https://cdn.test/cover.png">'
                 return httpx.Response(200, content=html, headers={"content-type": "text/html"})
             if request.url.path == "/cover.png":

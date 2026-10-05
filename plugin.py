@@ -14,10 +14,11 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .images import IMAGE_HEADERS, FetchPolicy, ImageFetchError, collect_images, image_urls_in_document, local_addresses, make_policy
 from .page import read_public_page
+from .public_http import PublicClient
 
 
 ANYSEARCH_ENDPOINT = "https://api.anysearch.com/mcp"
-CLIENT_HEADER = "neko-web/1.0.1"
+CLIENT_HEADER = "neko-web/1.0.2"
 VERTICAL_DOMAINS = {
     "academic",
     "agriculture",
@@ -244,8 +245,6 @@ class NekoWebPlugin(MaiBotPlugin):
         config = self.config.web
         return make_policy(
             blocked_ips=local_addresses(),
-            allow_unresolved=config.proxy_mode != "none",
-            check_peer=config.proxy_mode == "none",
             max_images=self._clamp_int(getattr(config, "max_images", 4), 1, 4, 4),
             max_image_bytes=self._clamp_int(getattr(config, "max_image_megabytes", 8), 1, 8, 8) * 1024 * 1024,
         )
@@ -262,9 +261,8 @@ class NekoWebPlugin(MaiBotPlugin):
         except AnySearchConfigError as exc:
             return f"{failure}：{exc}"
         try:
-            async with httpx.AsyncClient(
+            async with PublicClient(
                 timeout=config.timeout_seconds,
-                follow_redirects=False,
                 headers=IMAGE_HEADERS,
                 **client_options,
             ) as client:
