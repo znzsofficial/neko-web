@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "neko.web",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "name": "Neko 联网",
-  "description": "搜索公开网页，打开链接读取正文，并把页面里的图片发到当前聊天。",
+  "description": "搜索公开网页，读取正文和候选图片，由麦麦看图挑选后随回复发送。",
   "author": {
     "name": "NekoLaska",
     "url": "https://github.com/znzsofficial"
@@ -16,7 +16,7 @@
     "issues": "https://github.com/znzsofficial/neko-web/issues"
   },
   "host_application": {
-    "min_version": "1.2.0",
+    "min_version": "1.3.5",
     "max_version": "1.99.99"
   },
   "sdk": {
@@ -31,7 +31,7 @@
     },
     { "type": "python_package", "name": "aiohttp", "version_spec": ">=3.12" }
   ],
-  "capabilities": ["send.image"],
+  "capabilities": [],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": ["zh-CN"]
