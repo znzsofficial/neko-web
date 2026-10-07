@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html.parser import HTMLParser
+from math import isfinite
 from typing import Callable, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -13,7 +15,7 @@ except ImportError:
     from public_http import (PublicFetchError as ImageFetchError, default_resolver,
                              download_public as _download, is_public_ip, local_addresses, validate_url)
 
-CANDIDATES_PER_PAGE = 6
+CANDIDATES_PER_PAGE = 48
 PAGE_BYTES = 1_500_000
 IMAGE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; NekoWeb/1.0)",
@@ -46,44 +48,150 @@ def sniff_image(data: bytes) -> Optional[str]:
     return None
 
 
-def _attrs(tag: str) -> dict[str, str]:
-    found: dict[str, str] = {}
-    for match in re.finditer(r"([:\w-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, re.I):
-        found[match.group(1).lower()] = match.group(2) if match.group(2) is not None else match.group(3)
-    return found
+def normalize_image_url(raw: str, base_url: str = "") -> Optional[str]:
+    """Resolve and validate a public URL, preserving its path and query identity."""
+    if not isinstance(raw, str) or not raw.strip() or any(ord(c) < 32 for c in raw):
+        return None
+    try:
+        absolute = urljoin(base_url, raw.strip())
+        if validate_url(absolute):
+            return None
+        parsed = urlparse(absolute)
+        return parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(), fragment="").geturl()
+    except (ValueError, UnicodeError):
+        return None
+
+
+_UNSUPPORTED_SUFFIXES = (
+    ".svg", ".ico", ".css", ".js", ".m3u8", ".mp4", ".webm",
+    ".avif", ".heic", ".heif", ".bmp", ".tif", ".tiff", ".jxl",
+)
+_SUPPORTED_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*]\((https?://[^)\s]+)\)", re.I)
+
+
+def _srcset_candidates(value: str):
+    """Yield ranked URL tokens without splitting commas inside URL tokens."""
+    position = 0
+    while position < len(value):
+        while position < len(value) and (value[position].isspace() or value[position] == ","):
+            position += 1
+        match = re.match(r"\S+", value[position:])
+        if not match:
+            break
+        raw = match.group()
+        position += len(raw)
+        descriptor = ""
+        if raw.endswith(","):
+            raw = raw.rstrip(",")
+        else:
+            end = value.find(",", position)
+            if end == -1:
+                end = len(value)
+            descriptor = value[position:end].strip()
+            position = end + 1
+        if not descriptor:
+            yield 1.0, raw
+        elif re.fullmatch(r"(?:[0-9]+w|(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)x)", descriptor):
+            rank = float(descriptor[:-1])
+            if rank > 0 and isfinite(rank):
+                yield rank, raw
+
+
+class _ImageParser(HTMLParser):
+    def __init__(self, base_url: str, limit: int):
+        super().__init__(convert_charrefs=True)
+        self.base_url, self.limit = base_url, limit
+        self.meta: list[str] = []
+        self.images: list[str] = []
+        self.markdown: list[str] = []
+        self.ignored: Optional[str] = None
+        self.picture = False
+        self.picture_source: Optional[str] = None
+        self.picture_image: Optional[str] = None
+        self.picture_hidden = False
+
+    def candidate(self, raw: str) -> Optional[str]:
+        url = normalize_image_url(raw, self.base_url)
+        if url and not urlparse(url).path.lower().endswith(_UNSUPPORTED_SUFFIXES):
+            return url
+        return None
+
+    def add(self, target: list[str], url: Optional[str]) -> None:
+        if url and url not in target and len(target) < self.limit:
+            target.append(url)
+
+    def best(self, attrs: dict[str, str]) -> Optional[str]:
+        for key in ("data-srcset", "srcset"):
+            best_url, best_rank = None, -1.0
+            for rank, raw in _srcset_candidates(attrs.get(key, "")):
+                url = self.candidate(raw)
+                if url and rank > best_rank:
+                    best_url, best_rank = url, rank
+            if best_url:
+                return best_url
+        for key in ("data-src", "data-original", "data-lazy-src", "src"):
+            url = self.candidate(attrs.get(key, ""))
+            if url:
+                return url
+        return None
+
+    def finish_picture(self) -> None:
+        if self.picture and not self.picture_hidden:
+            self.add(self.images, self.picture_source or self.picture_image)
+        self.picture = False
+        self.picture_source = self.picture_image = None
+        self.picture_hidden = False
+
+    def handle_starttag(self, tag, attributes):
+        if self.ignored:
+            return
+        if tag in {"script", "style", "textarea", "title"}:
+            self.ignored = tag
+            return
+        attrs = {key: value or "" for key, value in attributes}
+        if tag == "meta":
+            key = (attrs.get("property") or attrs.get("name") or "").lower()
+            if key in {"og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"}:
+                self.add(self.meta, self.candidate(attrs.get("content", "")))
+        elif tag == "picture":
+            self.finish_picture()
+            self.picture = True
+        elif tag == "source" and self.picture and not self.picture_source:
+            mime = attrs.get("type", "").split(";", 1)[0].strip().lower()
+            if not mime or mime in _SUPPORTED_TYPES:
+                self.picture_source = self.best(attrs)
+        elif tag == "img":
+            hidden = attrs.get("width") in {"0", "1"} or attrs.get("height") in {"0", "1"}
+            if self.picture:
+                self.picture_hidden = self.picture_hidden or hidden
+                if not self.picture_image and not hidden:
+                    self.picture_image = self.best(attrs)
+            elif not hidden:
+                self.add(self.images, self.best(attrs))
+
+    def handle_endtag(self, tag):
+        if self.ignored:
+            if tag == self.ignored:
+                self.ignored = None
+        elif tag == "picture":
+            self.finish_picture()
+
+    def handle_data(self, data):
+        if not self.ignored:
+            for match in _MARKDOWN_IMAGE.finditer(data):
+                self.add(self.markdown, self.candidate(match.group(1)))
 
 
 def image_urls_in_document(text: str, base_url: str, limit: int = 8) -> list[str]:
     if not text or limit <= 0:
         return []
-    found: list[str] = []
-
-    def add(raw: str) -> None:
-        if len(found) >= limit or not raw:
-            return
-        try:
-            absolute = urljoin(base_url, raw.strip())
-            if validate_url(absolute) or absolute in found:
-                return
-            if urlparse(absolute).path.lower().endswith((".svg", ".ico", ".css", ".js", ".m3u8", ".mp4", ".webm")):
-                return
-        except (ValueError, UnicodeError):
-            return
-        found.append(absolute)
-
-    for tag in re.findall(r"<meta\b[^>]*>", text, re.I):
-        attrs = _attrs(tag)
-        key = (attrs.get("property") or attrs.get("name") or "").lower()
-        if key in {"og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"}:
-            add(attrs.get("content") or "")
-    for tag in re.findall(r"<img\b[^>]*>", text, re.I):
-        attrs = _attrs(tag)
-        if attrs.get("width") in {"0", "1"} or attrs.get("height") in {"0", "1"}:
-            continue
-        add(attrs.get("src") or "")
-    for raw in re.findall(r"!\[[^\]]*]\((https?://[^)\s]+)\)", text, re.I):
-        add(raw)
-    return found
+    limit = min(limit, CANDIDATES_PER_PAGE)
+    parser = _ImageParser(base_url, limit)
+    parser.feed(text)
+    parser.close()
+    parser.finish_picture()
+    return list(dict.fromkeys(parser.meta + parser.images + parser.markdown))[:limit]
 
 
 @dataclass(frozen=True)

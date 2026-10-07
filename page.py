@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Optional
 import httpx
@@ -43,6 +43,8 @@ class PageRead:
     text: str
     images: list[FetchedImage]
     notes: list[str]
+    candidates: list[str] = field(default_factory=list)
+    candidates_limited: bool = False
 
 
 class _TextExtractor(HTMLParser):
@@ -147,6 +149,7 @@ async def read_public_page(
     max_images: int = 4,
     max_image_bytes: int = 8 * 1024 * 1024,
     text_limit: int = 8000,
+    preview_only: bool = False,
 ) -> PageRead:
     """打开一个公开地址，读取正文并下载其中的图片。"""
 
@@ -165,8 +168,13 @@ async def read_public_page(
     title, text = page_text(data, content_type, text_limit)
     images: list[FetchedImage] = []
     notes: list[str] = []
+    candidates: list[str] = []
+    limited = False
     if is_html(data, content_type):
         document = data.decode("utf-8", "replace")
-        candidates = image_urls_in_document(document, final, CANDIDATES_PER_PAGE)
-        await download_candidate_images(client, candidates, active, images, notes)
-    return PageRead(final, title, text, images, notes)
+        candidates = image_urls_in_document(document, final, CANDIDATES_PER_PAGE + 1)
+        limited = len(candidates) >= CANDIDATES_PER_PAGE
+        candidates = candidates[:CANDIDATES_PER_PAGE]
+        if not preview_only:
+            await download_candidate_images(client, candidates, active, images, notes)
+    return PageRead(final, title, text, images, notes, candidates, limited)

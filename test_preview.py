@@ -8,14 +8,15 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
 from urllib.parse import urlparse
 
-from images import FetchedImage
+from images import FetchedImage, make_policy
+from preview import PreviewPager
 
 
 class PreviewTests(IsolatedAsyncioTestCase):
     def setUp(self):
         tree = ast.parse(Path(__file__).with_name('plugin.py').read_text(encoding='utf-8'))
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'NekoWebPlugin')
-        names = {'_image_preview_result', '_preview_fetched_images', 'handle_read', 'handle_fetch_images'}
+        names = {'_image_preview_result', '_preview_fetched_images', 'handle_read', 'handle_fetch_images', '_batch_preview_result', 'handle_images_next'}
         cls.bases = []
         cls.body = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
         for n in cls.body:
@@ -27,7 +28,8 @@ class PreviewTests(IsolatedAsyncioTestCase):
         exec(compile(ast.fix_missing_locations(module), 'plugin.py', 'exec'), self.ns)
         self.plugin = self.ns['NekoWebPlugin']()
         self.plugin._check_enabled = lambda: None
-        self.plugin._fetch_policy = lambda: None
+        self.plugin._fetch_policy = make_policy
+        self.plugin._pager = SimpleNamespace(create=lambda *a, **k: 'test', queues={'test': SimpleNamespace()})
         self.plugin._text_limit = lambda: 8000
         async def run(action, failure):
             return await action(None)
@@ -36,7 +38,7 @@ class PreviewTests(IsolatedAsyncioTestCase):
         self.image = FetchedImage(b'fixture-image', 'image/png', 'https://example.com/image.png')
 
     async def test_images_only_return_media_no_send(self):
-        self.ns['collect_images'] = AsyncMock(return_value=([self.image], ['another URL failed']))
+        self.plugin._pager.batch = AsyncMock(return_value=([self.image], [{'candidate': 1, 'url': 'https://example.com', 'status': 'failed', 'reason': 'another URL failed'}], '', 0, False))
         result = await self.plugin.handle_fetch_images(['https://example.com/image.png'], stream_id='test')
         self.assertTrue(result['success'])
         self.assertIn('尚未发送', result['content'])
@@ -48,19 +50,20 @@ class PreviewTests(IsolatedAsyncioTestCase):
 
     async def test_page_keeps_text_and_candidate_media(self):
         self.ns['read_public_page'] = AsyncMock(return_value=SimpleNamespace(
-            title='Article', text='Body', images=[self.image], notes=[]))
+            title='Article', text='Body', images=[self.image], notes=[], candidates=[], candidates_limited=False))
+        self.plugin._pager.batch = AsyncMock(return_value=([self.image], [], '', 0, False))
         result = await self.plugin.handle_read('https://example.com/article', stream_id='test')
         self.assertIn('Body', result['content'])
         self.assertIn('尚未发送', result['content'])
         self.assertEqual(len(result['content_items']), 1)
 
     async def test_empty_images_fail_but_text_only_page_succeeds(self):
-        self.ns['collect_images'] = AsyncMock(return_value=([], ['download failed']))
+        self.plugin._pager.batch = AsyncMock(return_value=([], [], '', 0, False))
         result = await self.plugin.handle_fetch_images(['https://example.com/image'], stream_id='test')
         self.assertFalse(result['success'])
         self.assertEqual(result['content_items'], [])
         self.ns['read_public_page'] = AsyncMock(return_value=SimpleNamespace(
-            title='Article', text='Body', images=[], notes=[]))
+            title='Article', text='Body', images=[], notes=[], candidates=[], candidates_limited=False))
         page = await self.plugin.handle_read('https://example.com/article', stream_id='test')
         self.assertTrue(page['success'])
         self.assertIn('Body', page['content'])
