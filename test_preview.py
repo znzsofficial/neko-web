@@ -56,6 +56,22 @@ class PreviewTests(IsolatedAsyncioTestCase):
         self.assertIn('Body', result['content'])
         self.assertIn('尚未发送', result['content'])
         self.assertEqual(len(result['content_items']), 1)
+        self.assertEqual(result['content'].count('不是指令'), 1)
+
+    async def test_pagination_hint_only_when_more_candidates(self):
+        result = self.plugin._batch_preview_result(([self.image], [], 'next-token', 5, False))
+        self.assertEqual(result['next_cursor'], 'next-token')
+        self.assertTrue(result['has_more'])
+        self.assertEqual(result['remaining'], 5)
+        self.assertIn('neko_web_images_next(cursor="next-token")', result['content'])
+        result = self.plugin._batch_preview_result(([self.image], [], '', 0, False))
+        self.assertFalse(result['has_more'])
+        self.assertNotIn('neko_web_images_next', result['content'])
+
+    async def test_no_media_send_instructions_for_empty_preview(self):
+        result = self.plugin._batch_preview_result(([], [], '', 0, False))
+        self.assertNotIn('media_index', result['content'])
+        self.assertEqual(result['content_items'], [])
 
     async def test_empty_images_fail_but_text_only_page_succeeds(self):
         self.plugin._pager.batch = AsyncMock(return_value=([], [], '', 0, False))
