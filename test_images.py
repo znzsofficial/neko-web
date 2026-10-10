@@ -6,16 +6,14 @@ from images import (
     ImageFetchError,
     collect_images,
     image_urls_in_document,
-    is_public_ip,
     sniff_image,
     validate_url,
 )
 
-PNG = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05"
-    b"\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
-)
+from public_http import is_public_ip
+from test_support import image_bytes
+
+PNG = image_bytes()
 
 
 def public_resolver(host: str) -> list[str]:
@@ -86,8 +84,8 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
             images, notes = await collect_images(client, ["https://news.test/post"], resolver=public_resolver)
         self.assertEqual(notes, [])
         self.assertEqual(len(images), 1)
-        self.assertEqual(images[0].mime, "image/png")
-        self.assertEqual(images[0].data, PNG)
+        self.assertEqual(images[0].mime, "image/jpeg")
+        self.assertEqual(images[0].original_size, len(PNG))
 
     async def test_oversized_image_is_rejected(self):
         def handler(request: httpx.Request) -> httpx.Response:

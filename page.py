@@ -19,6 +19,7 @@ try:
         is_html,
         make_policy,
         sniff_image,
+        decode_image,
     )
 except ImportError:
     from images import (
@@ -31,6 +32,7 @@ except ImportError:
         is_html,
         make_policy,
         sniff_image,
+        decode_image,
     )
 
 
@@ -54,14 +56,24 @@ class _TextExtractor(HTMLParser):
         self.og_title = ""
         self.description = ""
         self._parts: list[str] = []
+        self._main_parts: list[str] = []
+        self._article_parts: list[str] = []
+        self._main_depth = 0
+        self._article_depth = 0
         self._skip = 0
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         name = tag.lower()
-        if name in {"script", "style", "noscript", "svg", "template"}:
+        if name in {"script", "style", "noscript", "svg", "template", "nav", "header", "footer", "aside", "form"}:
             self._skip += 1
             return
+        if self._skip:
+            return
+        if name == 'main':
+            self._main_depth += 1
+        if name == 'article':
+            self._article_depth += 1
         if name == "title":
             self._in_title = True
         values = {key.lower(): value or "" for key, value in attrs}
@@ -71,24 +83,38 @@ class _TextExtractor(HTMLParser):
         if name == "meta" and meta == "og:title" and not self.og_title:
             self.og_title = values.get("content") or ""
         if name in {"p", "br", "div", "h1", "h2", "h3", "li", "tr", "section", "article"}:
-            self._parts.append("\n")
+            self.add_part('\n')
 
     def handle_endtag(self, tag: str) -> None:
         name = tag.lower()
-        if name in {"script", "style", "noscript", "svg", "template"} and self._skip:
+        if name in {"script", "style", "noscript", "svg", "template", "nav", "header", "footer", "aside", "form"} and self._skip:
             self._skip -= 1
+            return
+        if self._skip:
+            return
+        if name == 'main':
+            self._main_depth = max(0, self._main_depth - 1)
+        if name == 'article':
+            self._article_depth = max(0, self._article_depth - 1)
         if name == "title":
             self._in_title = False
 
     def handle_data(self, data: str) -> None:
+        if self._skip:
+            return
         if self._in_title:
             self.title += data
             return
-        if self._skip:
-            return
         text = " ".join(data.split())
         if text:
-            self._parts.append(text)
+            self.add_part(text)
+
+    def add_part(self, text):
+        self._parts.append(text)
+        if self._main_depth:
+            self._main_parts.append(text)
+        if self._article_depth:
+            self._article_parts.append(text)
 
 
 def _collapse(parts: list[str], limit: int) -> str:
@@ -121,7 +147,7 @@ def page_text(data: bytes, content_type: str, limit: int) -> tuple[str, str]:
     if declared == "application/json" or text.lstrip().startswith(("{", "[")):
         try:
             text = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             pass
         return "", _collapse([text], limit)
     if not is_html(data, content_type) and declared.startswith("text/"):
@@ -131,8 +157,9 @@ def page_text(data: bytes, content_type: str, limit: int) -> tuple[str, str]:
     parser.close()
     title = " ".join((parser.title or parser.og_title).split())
     description = " ".join(parser.description.split())
-    body = _collapse(parser._parts, limit)
-    if description and description not in body[:400]:
+    preferred = parser._article_parts or parser._main_parts or parser._parts
+    body = _collapse(preferred, limit)
+    if description and not (parser._article_parts or parser._main_parts) and description not in body[:400]:
         body = _collapse([description, "\n", body], limit)
     return title[:200], body
 
@@ -164,7 +191,7 @@ async def read_public_page(
     data, content_type, final = await download_public(client, url, policy=active)
     mime = sniff_image(data)
     if mime:
-        return PageRead(final, "", "", [FetchedImage(data, mime, final)], [])
+        return PageRead(final, "", "", [await decode_image(data, final)], [])
     title, text = page_text(data, content_type, text_limit)
     images: list[FetchedImage] = []
     notes: list[str] = []

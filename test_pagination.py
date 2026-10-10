@@ -5,6 +5,7 @@ import httpx
 
 from images import FetchedImage, HtmlPage, ImageFetchError, make_policy
 from preview import PreviewPager
+from test_support import image_bytes
 
 
 class PagerTests(IsolatedAsyncioTestCase):
@@ -89,7 +90,7 @@ class PagerTests(IsolatedAsyncioTestCase):
             calls.append(str(request.url))
             if request.url.path == '/redirect':
                 return httpx.Response(302, headers={'location': 'http://169.254.169.254/latest'})
-            return httpx.Response(200, content=b'\x89PNG\r\n\x1a\nfixture', headers={'content-type': 'image/png'})
+            return httpx.Response(200, content=image_bytes(), headers={'content-type': 'image/png'})
         policy = make_policy(max_images=1, resolver=lambda host: ['1.1.1.1'])
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
             first = await pager.batch(client, 'a', token, policy)

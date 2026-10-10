@@ -48,7 +48,7 @@ class ProviderTests(IsolatedAsyncioTestCase):
 
     async def test_errors_do_not_leak_response_or_follow_redirects(self):
         for status in [401, 429, 302]:
-            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(status, text='secret diagnostics'))) as client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r, status=status: httpx.Response(status, text='secret diagnostics'))) as client:
                 with self.assertRaisesRegex(ProviderError, f'^HTTP {status}$'):
                     await search(client, 'test', 'query', 1)
 

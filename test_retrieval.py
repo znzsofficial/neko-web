@@ -112,7 +112,7 @@ class PipelineTests(IsolatedAsyncioTestCase):
 
     async def test_body_timeout_keeps_search_evidence(self):
         config = self.config(); config.timeout_seconds = .01
-        async def extract(*args):
+        async def extract(*args, **kwargs):
             await asyncio.sleep(1)
         with patch('retrieval.search_exa_results', new_callable=AsyncMock, return_value=[{'url': 'https://example.com', 'highlights': ['evidence']}]), \
              patch('retrieval.extract_firecrawl', side_effect=extract):

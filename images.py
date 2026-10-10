@@ -2,21 +2,31 @@
 from __future__ import annotations
 
 import re
+import asyncio
+import io
+import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from math import isfinite
 from typing import Callable, Optional
 from urllib.parse import urljoin, urlparse
 
+from PIL import Image, ImageOps, UnidentifiedImageError
+
 try:
     from .public_http import (PublicFetchError as ImageFetchError, default_resolver,
-                              download_public as _download, is_public_ip, local_addresses, validate_url)
+                              download_public as _download, local_addresses as local_addresses, validate_url)
 except ImportError:
     from public_http import (PublicFetchError as ImageFetchError, default_resolver,
-                             download_public as _download, is_public_ip, local_addresses, validate_url)
+                             download_public as _download, local_addresses as local_addresses, validate_url)
 
 CANDIDATES_PER_PAGE = 48
 PAGE_BYTES = 1_500_000
+MAX_PIXELS = 20_000_000
+MAX_FRAME_PIXELS = 40_000_000
+MAX_PREVIEW_BYTES = 256 * 1024
+_IMAGE_WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix='neko-image')
 IMAGE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; NekoWeb/1.0)",
     "Accept": "image/webp,image/png,image/jpeg,image/gif,text/html;q=0.9,*/*;q=0.5",
@@ -29,11 +39,76 @@ class FetchedImage:
     data: bytes
     mime: str
     source: str
+    width: int = 0
+    height: int = 0
+    original_sha256: str = ''
+    original_size: int = 0
+    original_mime: str = ''
 
     def caption(self) -> str:
         parsed = urlparse(self.source)
         name = (parsed.path.rsplit("/", 1)[-1] or "image")[:40]
-        return f"{parsed.hostname or '图片'} {name}".strip()[:80]
+        size = f' {self.width}×{self.height}' if self.width and self.height else ''
+        quality = '（低清候选）' if self.width and min(self.width, self.height) < 720 else ''
+        return f"{parsed.hostname or '图片'} {name}{size}{quality}".strip()[:120]
+
+
+def prepare_image(data: bytes, source: str, *, preview: bool = True) -> FetchedImage:
+    """Validate real decoding and bound pixels/frames; never reencode originals."""
+    import hashlib
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                mime = {'JPEG': 'image/jpeg', 'PNG': 'image/png', 'GIF': 'image/gif', 'WEBP': 'image/webp'}.get(image.format)
+                if not mime:
+                    raise ImageFetchError('不是支持的图片')
+                width, height = image.size
+                frames = getattr(image, 'n_frames', 1)
+                if width * height > MAX_PIXELS or width * height * frames > MAX_FRAME_PIXELS or frames > 100:
+                    raise ImageFetchError('图片像素或动图帧数超过限制，请使用原链接')
+                image.verify()
+            with Image.open(io.BytesIO(data)) as image:
+                for index in range(frames):
+                    image.seek(index)
+                    if image.width * image.height > MAX_PIXELS:
+                        raise ImageFetchError('图片像素超过限制')
+                    image.load()
+                image.seek(0)
+                if preview:
+                    oriented = ImageOps.exif_transpose(image)
+                    width, height = oriented.size
+                    try:
+                        thumb = oriented.convert('RGB')
+                        try:
+                            thumb.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+                            for quality in (85, 70, 55):
+                                output = io.BytesIO()
+                                thumb.save(output, format='JPEG', quality=quality, optimize=True)
+                                if output.tell() <= MAX_PREVIEW_BYTES:
+                                    break
+                                thumb.thumbnail((max(1, thumb.width * 3 // 4), max(1, thumb.height * 3 // 4)))
+                            else:
+                                raise ImageFetchError('无法生成限量预览')
+                            result = output.getvalue()
+                        finally:
+                            thumb.close()
+                    finally:
+                        oriented.close()
+                else:
+                    result = data
+    except ImageFetchError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError,
+            Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise ImageFetchError('图片损坏、无法解码或像素超过限制') from None
+    return FetchedImage(result, 'image/jpeg' if preview else mime, source, width, height,
+                        hashlib.sha256(data).hexdigest(), len(data), mime)
+
+
+async def decode_image(data, source, *, preview=True):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_IMAGE_WORKERS, lambda: prepare_image(data, source, preview=preview))
 
 
 def sniff_image(data: bytes) -> Optional[str]:
@@ -110,6 +185,7 @@ class _ImageParser(HTMLParser):
         self.picture_source: Optional[str] = None
         self.picture_image: Optional[str] = None
         self.picture_hidden = False
+        self.anchor_original: Optional[str] = None
 
     def candidate(self, raw: str) -> Optional[str]:
         url = normalize_image_url(raw, self.base_url)
@@ -122,6 +198,12 @@ class _ImageParser(HTMLParser):
             target.append(url)
 
     def best(self, attrs: dict[str, str]) -> Optional[str]:
+        # Only use original URLs actually supplied by the page. Do not strip
+        # resize/signature parameters or invent CDN variants.
+        for key in ('data-original', 'data-full', 'data-fullsize', 'data-large', 'data-zoom-image'):
+            original = self.candidate(attrs.get(key, ''))
+            if original:
+                return original
         for key in ("data-srcset", "srcset"):
             best_url, best_rank = None, -1.0
             for rank, raw in _srcset_candidates(attrs.get(key, "")):
@@ -138,7 +220,7 @@ class _ImageParser(HTMLParser):
 
     def finish_picture(self) -> None:
         if self.picture and not self.picture_hidden:
-            self.add(self.images, self.picture_source or self.picture_image)
+            self.add(self.images, self.anchor_original or self.picture_source or self.picture_image)
         self.picture = False
         self.picture_source = self.picture_image = None
         self.picture_hidden = False
@@ -150,7 +232,10 @@ class _ImageParser(HTMLParser):
             self.ignored = tag
             return
         attrs = {key: value or "" for key, value in attributes}
-        if tag == "meta":
+        if tag == 'a':
+            href = self.candidate(attrs.get('href', ''))
+            self.anchor_original = href if href and urlparse(href).path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')) else None
+        elif tag == "meta":
             key = (attrs.get("property") or attrs.get("name") or "").lower()
             if key in {"og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"}:
                 self.add(self.meta, self.candidate(attrs.get("content", "")))
@@ -168,7 +253,7 @@ class _ImageParser(HTMLParser):
                 if not self.picture_image and not hidden:
                     self.picture_image = self.best(attrs)
             elif not hidden:
-                self.add(self.images, self.best(attrs))
+                self.add(self.images, self.anchor_original or self.best(attrs))
 
     def handle_endtag(self, tag):
         if self.ignored:
@@ -176,6 +261,8 @@ class _ImageParser(HTMLParser):
                 self.ignored = None
         elif tag == "picture":
             self.finish_picture()
+        elif tag == 'a':
+            self.anchor_original = None
 
     def handle_data(self, data):
         if not self.ignored:
@@ -229,11 +316,11 @@ def is_html(data: bytes, content_type: str) -> bool:
     return sample.startswith((b"<!doctype html", b"<html")) or b"<img" in sample or b"og:image" in sample
 
 
-async def load_image(client, url: str, policy: FetchPolicy) -> FetchedImage:
+async def load_image(client, url: str, policy: FetchPolicy, *, preview=True) -> FetchedImage:
     data, content_type, final = await download_public(client, url, policy=policy)
     mime = sniff_image(data)
     if mime:
-        return FetchedImage(data, mime, final)
+        return await decode_image(data, final, preview=preview)
     if is_html(data, content_type):
         raise HtmlPage(data, final)
     raise ImageFetchError("不是支持的图片")

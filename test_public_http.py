@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import httpx
 
-from images import ImageFetchError, collect_images, validate_url
+from images import collect_images, validate_url
 from page import read_public_page
 from public_http import PublicClient, download_public, is_public_ip
 from test_images import PNG
@@ -30,7 +30,7 @@ class PublicDownloadTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             for ips in ([], ['1.1.1.1', '127.0.0.1']):
                 images, notes = await collect_images(client, ['https://dns.test/x'],
-                    resolver=lambda host: ips, allow_unresolved=True, check_peer=False)
+                    resolver=lambda host, ips=ips: ips, allow_unresolved=True, check_peer=False)
                 self.assertFalse(images)
                 self.assertTrue(notes)
 

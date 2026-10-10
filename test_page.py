@@ -23,7 +23,7 @@ class PageTextTests(unittest.TestCase):
     def test_html_drops_script_and_keeps_title(self):
         title, text = page_text(HTML.encode(), "text/html; charset=utf-8", 8000)
         self.assertEqual(title, "示例 文章")
-        self.assertIn("这是摘要", text)
+        self.assertNotIn("这是摘要", text)
         self.assertIn("第一段正文", text)
         self.assertNotIn("不要出现", text)
         self.assertNotIn("color", text)

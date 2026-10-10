@@ -39,9 +39,12 @@ class PreviewPager:
     def __init__(self, clock=time.monotonic):
         self.clock = clock
         self.queues = {}
+        self.active = {}
+        self.generation = 0
 
     def clear(self):
         self.queues.clear()
+        self.generation += 1
 
     def _prune(self):
         now = self.clock()
@@ -63,9 +66,12 @@ class PreviewPager:
     def create(self, scope, urls, *, expand=True):
         self._prune()
         same = [key for key, value in self.queues.items() if value.scope == scope]
-        while len(same) >= self.MAX_PER_CHAT:
+        inflight = sum(state.scope == scope for state in self.active.values())
+        if inflight >= self.MAX_PER_CHAT or len(self.active) >= self.MAX_QUEUES:
+            raise ImageFetchError('图片预览任务繁忙，请稍后再试')
+        while len(same) + inflight >= self.MAX_PER_CHAT:
             del self.queues[same.pop(0)]
-        while len(self.queues) >= self.MAX_QUEUES:
+        while len(self.queues) + len(self.active) >= self.MAX_QUEUES:
             del self.queues[next(iter(self.queues))]
         state = Queue(scope=scope, expires=self.clock() + self.TTL)
         self._enqueue(state, urls, expand)
@@ -80,11 +86,19 @@ class PreviewPager:
             raise ImageFetchError("预览游标无效、已用过或已过期，请重新打开原链接。")
         # Consume before awaiting: concurrent calls cannot download the same batch.
         del self.queues[token]
+        self.active[token] = state
+        generation = self.generation
+        try:
+            return await self._batch(client, scope, state, policy, initial_images=initial_images, generation=generation)
+        finally:
+            self.active.pop(token, None)
+
+    async def _batch(self, client, scope, state, policy, *, initial_images, generation):
         images, details = [], []
 
         def accept(image, source, number):
             final = normalize_image_url(image.source)
-            digest = hashlib.sha256(image.data).hexdigest()
+            digest = image.original_sha256 or hashlib.sha256(image.data).hexdigest()
             if final in state.final_urls or digest in state.hashes:
                 details.append({"candidate": number, "url": source, "status": "duplicate"})
                 return
@@ -92,7 +106,8 @@ class PreviewPager:
             state.hashes.add(digest)
             images.append(image)
             details.append({"candidate": number, "url": source, "status": "ready",
-                            "media_item": len(images)})
+                            "media_item": len(images), "final_url": image.source,
+                            "width": image.width, "height": image.height})
 
         for image in initial_images:
             state.number += 1
@@ -134,9 +149,17 @@ class PreviewPager:
                                 "reason": "下载未完成"})
 
         next_cursor = ""
-        if state.pending and state.expires > self.clock():
+        if state.pending and state.expires > self.clock() and generation == self.generation:
             next_cursor = secrets.token_urlsafe(24)
-            while len(self.queues) >= self.MAX_QUEUES:
+            while len(self.queues) + len(self.active) > self.MAX_QUEUES and self.queues:
                 del self.queues[next(iter(self.queues))]
             self.queues[next_cursor] = state
+        images.sort(key=lambda image: image.width * image.height, reverse=True)
+        for item in details:
+            if item.get('status') == 'ready':
+                source_order = [image.source for image in images]
+                # Candidate URL may redirect; retain the exact accepted source.
+                source = item.get('final_url')
+                if source in source_order:
+                    item['media_item'] = source_order.index(source) + 1
         return images, details, next_cursor, len(state.pending), state.limited
