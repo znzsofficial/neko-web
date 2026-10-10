@@ -4,6 +4,10 @@
 
 搜索走 [AnySearch](https://anysearch.com)。打开链接和下载图片由插件自己完成。搜索客户端的早期实现来自 [gomico/maibot_plugin_anysearch](https://github.com/gomico/maibot_plugin_anysearch)，该项目以 MIT 许可证发布。
 
+1.3.0可在 `[web]` 设置 `search_provider="exa"`、`exa_api_key`，普通/批量搜索使用Exa auto＋有来源的摘录，专用领域继续AnySearch。设置 `extract_provider="firecrawl"`、`firecrawl_api_key` 后长文工具走Firecrawl v2 Markdown提取（含动态页），`read`和图片仍走原本公网下载器。默认仍为AnySearch；不自动跨供应商重试、不开deep/crawl/付费代理等额外能力。两家均按服务商额度计费，请自行设额度限制。
+
+Firecrawl提取会把目标URL交给第三方。发送前验证URL及DNS为公网，但远端DNS/重定向由Firecrawl处理，不能宣称具有本地下载器同等IP固定保护；不要用于敏感或带访问令牌的链接。响应限2MiB，正文按配置截短，错误不回显原始响应或密钥。
+
 ## 安装
 
 把这个目录放到 MaiBot 的 `plugins/neko-web`，复制 `config.example.toml` 为 `config.toml`，然后在 WebUI 里启用。

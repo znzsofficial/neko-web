@@ -3,6 +3,11 @@ enabled = false
 config_version = "1.0.0"
 
 [web]
+search_provider = "anysearch" # anysearch / exa
+extract_provider = "anysearch" # anysearch / firecrawl
+exa_api_key = ""
+firecrawl_api_key = ""
+
 # AnySearch API Key（可选；留空使用匿名访问）
 api_key = ""
 
