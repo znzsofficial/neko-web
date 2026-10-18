@@ -18,7 +18,7 @@ class ToolDescriptionTests(TestCase):
         self.assertEqual(len(self.tools), 8)
         for name, tool in self.tools.items():
             description = ast.literal_eval(tool['description'])
-            self.assertLessEqual(len(description), 80, name)
+            self.assertLessEqual(len(description), 45, name)
             self.assertNotIn('media_index', description, name)
             self.assertNotIn('cursor', description, name)
 

@@ -1,5 +1,7 @@
 # Neko Web
 
+1.6.2：精简给麦麦看的专用数据源/正文提取说明，工具名、参数及检索/安全策略不变。
+
 给 [MaiBot](https://github.com/Mai-with-u/MaiBot) 用的联网插件。搜索公开网页，读取标题、正文和候选图片，由麦麦看图挑选后随回复发送。
 
 搜索走 [AnySearch](https://anysearch.com)。打开链接和下载图片由插件自己完成。搜索客户端的早期实现来自 [gomico/maibot_plugin_anysearch](https://github.com/gomico/maibot_plugin_anysearch)，该项目以 MIT 许可证发布。
