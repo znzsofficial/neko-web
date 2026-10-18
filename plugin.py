@@ -5,12 +5,13 @@ from __future__ import annotations
 import base64
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, List, Literal
 from urllib.parse import urlparse
 
 import httpx
 
-from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Field, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk import API, CONFIG_RELOAD_SCOPE_SELF, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .images import IMAGE_HEADERS, FetchPolicy, ImageFetchError, image_urls_in_document, local_addresses, make_policy, load_image
@@ -22,11 +23,14 @@ from .public_http import validate_url
 from .originals import OriginalRegistry
 from .runtime import Deadline, WorkManager, bounded_text, tracked
 from .retrieval import (bounded_batch, error_status, retrieve, search_filters,
-                        MAX_SEARCH_CONCURRENCY, MAX_READ_PAGES)
+                         MAX_SEARCH_CONCURRENCY, MAX_READ_PAGES)
+from .automation_auth import AuthError, read_keys, verify
+from .automation_jobs import JobError, JobService
+from .automation_retrieval import search_data, read_data
 
 
 ANYSEARCH_ENDPOINT = "https://api.anysearch.com/mcp"
-CLIENT_HEADER = "neko-web/1.5.0"
+CLIENT_HEADER = "neko-web/1.6.0"
 VERTICAL_DOMAINS = {
     "academic",
     "agriculture",
@@ -142,11 +146,16 @@ class WebConfig(PluginConfigBase):
     )
 
 
+class AutomationConfig(PluginConfigBase):
+    enabled: bool = Field(default=False, description='受签名授权的后台检索API；不影响手动搜索')
+
+
 class NekoWebPluginConfig(PluginConfigBase):
     """Neko Web 插件配置。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    automation: AutomationConfig = Field(default_factory=AutomationConfig)
 
 
 class NekoWebPlugin(MaiBotPlugin):
@@ -163,12 +172,15 @@ class NekoWebPlugin(MaiBotPlugin):
         self._public_slots = asyncio.Semaphore(2)
         self._originals = OriginalRegistry()
         self._work = WorkManager()
+        self._automation = None
+        self._automation_lock = asyncio.Lock()
 
     async def on_unload(self) -> None:
         """处理插件卸载。"""
 
         self.ctx.logger.info("Neko Web 插件已卸载")
         await self._work.close()
+        await self._close_automation()
         self._pager.clear()
         self._originals.clear()
 
@@ -177,10 +189,67 @@ class NekoWebPlugin(MaiBotPlugin):
 
         del config_data, version
         if scope == CONFIG_RELOAD_SCOPE_SELF:
+            await self._close_automation()
             await self._work.close()
             self._pager.clear()
             self._originals.clear()
             self._work = WorkManager()
+
+    async def _close_automation(self):
+        async with self._automation_lock:
+            service, self._automation = self._automation, None
+            if service is not None:
+                await service.close()
+
+    async def _automation_execute(self, kind, arguments):
+        if self._check_enabled() or not self.config.automation.enabled:
+            return {'success': False, 'status': 'disabled'}
+        config = self.config.web.model_copy(deep=True)
+        try:
+            async with asyncio.timeout(55):
+                if kind == 'search':
+                    async with self._search_slots:
+                        return await search_data(config, self._build_client_options(config), arguments['query'])
+                async with self._public_slots:
+                    return await read_data(config, self._build_client_options(config), arguments['url'])
+        except ProviderError as exc:
+            return {'success': False, 'status': exc.code, 'cost_known': False}
+        except TimeoutError:
+            raise
+        except Exception:
+            return {'success': False, 'status': 'unavailable', 'cost_known': False}
+
+    @API(name='automation_v1', description='签名授权的异步后台检索', version='1', public=True)
+    async def automation_v1(self, packet=None, **kwargs):
+        del kwargs
+        if self._check_enabled() or not self.config.automation.enabled:
+            return {'success': False, 'status': 'disabled'}
+        try:
+            directory = Path(self.ctx.paths.data_dir)
+            client, operation, body, nonce = verify(packet, read_keys(directory / 'automation-keys.json'), 'neko.web')
+            async with self._automation_lock:
+                if not self.config.automation.enabled:
+                    return {'success': False, 'status': 'disabled'}
+                if self._automation is None:
+                    service = JobService(directory, self._automation_execute)
+                    try:
+                        await service.open()
+                    except BaseException:
+                        await service.close()
+                        raise
+                    self._automation = service
+                service = self._automation
+                if operation == 'capabilities' and not body:
+                    await service.store.call('nonce', client, nonce)
+                    return {'success': True, 'schema_version': 1, 'search_provider': self.config.web.search_provider,
+                            'read': 'bounded_public_text', 'daily_search_max': 6, 'daily_read_max': 6,
+                            'structured_anysearch': 'results_json_only', 'cost_known': False}
+                result = await service.dispatch(client, operation, body, nonce)
+                return {'success': True, **result}
+        except (AuthError, JobError) as exc:
+            return {'success': False, 'status': str(exc)}
+        except Exception:
+            return {'success': False, 'status': 'unavailable'}
 
     def _build_client_options(self, config=None) -> dict[str, Any]:
         """根据配置构造 httpx 客户端代理参数。"""

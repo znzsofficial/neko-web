@@ -170,9 +170,11 @@ class AuditAsyncTests(IsolatedAsyncioTestCase):
 
     async def test_almost_expired_deadline_preserves_search_results(self):
         config = SimpleNamespace(exa_api_key='test', firecrawl_api_key='test', extract_provider='firecrawl', timeout_seconds=5)
-        with patch('retrieval.search_exa_results', AsyncMock(return_value=[{'url': 'https://example.com', 'highlights': ['evidence']}])):
+        with patch('retrieval.search_exa_results', AsyncMock(return_value=[{'url': 'https://example.com', 'highlights': ['evidence']}])), \
+             patch('retrieval.extract_firecrawl', AsyncMock(return_value='unexpected request')) as extract:
             result = await retrieve(None, config, 'query', 5, {}, 1, deadline=Deadline.after(2.01))
         self.assertIn('evidence', result)
+        extract.assert_not_awaited()
 
     async def test_preview_inflight_tasks_count_against_capacity(self):
         pager = PreviewPager()

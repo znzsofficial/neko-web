@@ -113,15 +113,22 @@ def error_status(exc):
     return code, messages.get(code, messages['provider_error'])
 
 
-async def retrieve(client, config, query, count, filters, read_pages=0, body_limit=4000, *, deadline=None):
-    if isinstance(read_pages, bool) or not isinstance(read_pages, int) or not 0 <= read_pages <= MAX_READ_PAGES:
-        raise ProviderError('原文数量无效')
+async def search_sources(client, config, query, count, filters, *, deadline=None):
+    """Shared structured Exa search; tool formatting is deliberately separate."""
     deadline = deadline or Deadline.after(95)
     async with asyncio.timeout(min(config.timeout_seconds, 30, deadline.remaining(2))):
         results = await search_exa_results(client, config.exa_api_key, query, count, filters)
     sources, stats = organize_results(results, count)
     if results and not sources:
         raise ProviderError('搜索条目全部无效', 'invalid_response')
+    return sources, stats
+
+
+async def retrieve(client, config, query, count, filters, read_pages=0, body_limit=4000, *, deadline=None):
+    if isinstance(read_pages, bool) or not isinstance(read_pages, int) or not 0 <= read_pages <= MAX_READ_PAGES:
+        raise ProviderError('原文数量无效')
+    deadline = deadline or Deadline.after(95)
+    sources, stats = await search_sources(client, config, query, count, filters, deadline=deadline)
     body_limit = min(body_limit, MAX_BODY_CHARS)
     search_budget = MAX_SEARCH_OUTPUT - read_pages * (body_limit + 512) - 512
     visible, metadata_blocks, used = [], [], 0
@@ -156,7 +163,7 @@ async def retrieve(client, config, query, count, filters, read_pages=0, body_lim
             continue
         try:
             remaining = body_deadline.remaining()
-            if remaining <= 0:
+            if remaining < 1:
                 raise TimeoutError
             async with asyncio.timeout(min(remaining, config.timeout_seconds)):
                 body = await extract_firecrawl(client, config.firecrawl_api_key, source['url'],
