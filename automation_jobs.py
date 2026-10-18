@@ -22,7 +22,7 @@ class JobError(ValueError):
 
 
 class JobStore:
-    def __init__(self, directory, clock=time.time):
+    def __init__(self, directory, clock=time.time, limits=None):
         self.path = Path(directory) / "automation.db"
         self.clock = clock
         self.executor = ThreadPoolExecutor(
@@ -30,6 +30,9 @@ class JobStore:
         )
         self.conn = None
         self.pending = 0
+        self.limits = {kind: (limits or {}).get(kind, 6) for kind in ("search", "read")}
+        if any(type(v) is not int or v < 0 for v in self.limits.values()):
+            raise JobError("invalid_budget")
 
     async def call(self, method, *args):
         if self.pending >= 32 and method != "close":
@@ -39,11 +42,20 @@ class JobStore:
             self.executor, getattr(self, "_" + method), *args
         )
 
-        def finished(_):
-            self.pending -= 1
+        released = False
+
+        def finished(_=None):
+            nonlocal released
+            if not released:
+                released = True
+                self.pending -= 1
 
         future.add_done_callback(finished)
-        return await asyncio.shield(future)
+        try:
+            return await asyncio.shield(future)
+        finally:
+            if future.done():
+                finished()
 
     def _open(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,8 +128,26 @@ class JobStore:
                     .isoformat(),
                 ),
             )
-            if self.conn.execute("SELECT count(*) FROM jobs").fetchone()[0] >= 128:
+            if self.conn.execute("SELECT count(*) FROM jobs").fetchone()[0] >= 8192:
                 raise JobError("capacity")
+            if (
+                self.conn.execute(
+                    "SELECT count(*) FROM jobs WHERE status!='expired'"
+                ).fetchone()[0]
+                >= 128
+            ):
+                oldest = self.conn.execute(
+                    "SELECT id FROM jobs WHERE status NOT IN ('queued','running','expired') AND created<? ORDER BY created LIMIT 1",
+                    (self.clock() - 180,),
+                ).fetchone()
+                if not oldest:
+                    raise JobError("capacity")
+                # Keep a small idempotency tombstone; release payload capacity,
+                # never resubmit uncertain work merely because its result aged.
+                self.conn.execute(
+                    "UPDATE jobs SET status='expired',body='{}',result=NULL WHERE id=?",
+                    (oldest[0],),
+                )
             if (
                 self.conn.execute(
                     "SELECT count(*) FROM jobs WHERE status IN ('queued','running')"
@@ -129,7 +159,7 @@ class JobStore:
                 "SELECT count FROM usage WHERE client=? AND day=? AND kind=?",
                 (client, day, kind),
             ).fetchone()
-            if count and count[0] >= 6:
+            if self.limits[kind] and count and count[0] >= self.limits[kind]:
                 raise JobError("budget_exceeded")
             self.conn.execute(
                 "INSERT INTO usage VALUES (?,?,?,1) ON CONFLICT(client,day,kind) DO UPDATE SET count=count+1",
@@ -192,8 +222,8 @@ class JobStore:
 
 
 class JobService:
-    def __init__(self, directory, execute, clock=time.time):
-        self.store = JobStore(directory, clock)
+    def __init__(self, directory, execute, clock=time.time, limits=None):
+        self.store = JobStore(directory, clock, limits)
         self.execute = execute
         self.tasks = {}
         self.closed = False

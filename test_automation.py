@@ -187,6 +187,28 @@ class JobsTests(unittest.IsolatedAsyncioTestCase):
         self.now[0] += 86400
         await self.submit("tomorrow")
 
+    async def test_zero_daily_budget_keeps_queue_and_result_safety(self):
+        await self.service.close()
+        self.service = JobService(
+            self.temp.name,
+            self.service.execute,
+            clock=lambda: self.now[0],
+            limits={"search": 0, "read": 0},
+        )
+        await self.service.open()
+        self.release.set()
+        for i in range(12):
+            result = await self.submit("unlimited" + str(i))
+            task = self.service.tasks.get(result["job_id"])
+            if task:
+                await task
+        self.assertEqual(len(self.calls), 12)
+        self.release.clear()
+        for i in range(4):
+            await self.submit("queued" + str(i))
+        with self.assertRaisesRegex(JobError, "busy"):
+            await self.submit("fifth-queued")
+
     async def test_queue_capacity_and_single_background_slot(self):
         for i in range(4):
             await self.submit(str(i))
@@ -194,6 +216,30 @@ class JobsTests(unittest.IsolatedAsyncioTestCase):
             await self.submit("fifth")
         await self.entered.wait()
         self.assertEqual(len(self.calls), 1)
+
+    async def test_finished_payload_capacity_reclaims_without_duplicate_external_work(
+        self,
+    ):
+        self.service.store.limits = {"search": 0, "read": 0}
+        first = None
+        arguments = {"query": "public synthetic topic"}
+        for i in range(128):
+            key, _ = await self.service.store.call(
+                "submit", "neko.life", "r" + str(i), "search", arguments
+            )
+            first = first or key
+            await self.service.store.call("update", key, "succeeded", {"success": True})
+        self.now[0] += 181
+        await self.service.store.call("submit", "neko.life", "new", "search", arguments)
+        self.assertEqual(
+            (await self.service.store.call("get", "neko.life", first))["status"],
+            "expired",
+        )
+        key, fresh = await self.service.store.call(
+            "submit", "neko.life", "r0", "search", arguments
+        )
+        self.assertEqual(key, first)
+        self.assertFalse(fresh)
 
     async def test_unknown_schema_and_corrupt_database_preserved(self):
         await self.service.close()

@@ -30,7 +30,7 @@ from .automation_retrieval import search_data, read_data
 
 
 ANYSEARCH_ENDPOINT = "https://api.anysearch.com/mcp"
-CLIENT_HEADER = "neko-web/1.6.0"
+CLIENT_HEADER = "neko-web/1.6.1"
 VERTICAL_DOMAINS = {
     "academic",
     "agriculture",
@@ -148,6 +148,8 @@ class WebConfig(PluginConfigBase):
 
 class AutomationConfig(PluginConfigBase):
     enabled: bool = Field(default=False, description='受签名授权的后台检索API；不影响手动搜索')
+    daily_search_max: int = Field(default=6, ge=0, description='每客户端每日后台搜索，0不限')
+    daily_read_max: int = Field(default=6, ge=0, description='每客户端每日后台正文读取，0不限')
 
 
 class NekoWebPluginConfig(PluginConfigBase):
@@ -231,7 +233,8 @@ class NekoWebPlugin(MaiBotPlugin):
                 if not self.config.automation.enabled:
                     return {'success': False, 'status': 'disabled'}
                 if self._automation is None:
-                    service = JobService(directory, self._automation_execute)
+                    service = JobService(directory, self._automation_execute,
+                        limits={'search': self.config.automation.daily_search_max, 'read': self.config.automation.daily_read_max})
                     try:
                         await service.open()
                     except BaseException:
@@ -242,7 +245,8 @@ class NekoWebPlugin(MaiBotPlugin):
                 if operation == 'capabilities' and not body:
                     await service.store.call('nonce', client, nonce)
                     return {'success': True, 'schema_version': 1, 'search_provider': self.config.web.search_provider,
-                            'read': 'bounded_public_text', 'daily_search_max': 6, 'daily_read_max': 6,
+                            'read': 'bounded_public_text', 'daily_search_max': self.config.automation.daily_search_max,
+                            'daily_read_max': self.config.automation.daily_read_max,
                             'structured_anysearch': 'results_json_only', 'cost_known': False}
                 result = await service.dispatch(client, operation, body, nonce)
                 return {'success': True, **result}
