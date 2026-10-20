@@ -142,6 +142,8 @@ MaiBot 1.3 不会把插件工具直接放进可调用列表。规划器先看到
 
 ## 开发
 
+GitHub CI在Ubuntu/Windows×Python3.12/3.14×SDK2.12最低/最新`<3`运行8格，不需要任何真实供应商Key。`scripts/ci.py`要求真实SDK存在、发现至少161项测试，并拒绝除Windows POSIX权限项以外的意外skip；这不是QQ或供应商实测。工作流固定Actions SHA、只读权限，构建明确allowlist ZIP后从临时解压目录真实导入SDK插件，再上传14天保留的CI产物。无配置/Key/DB/pycache，无自动Release或部署。仅新增CI与包验收，不改变1.9.0运行逻辑。
+
 1.5.0审查修复：AnySearch也使用2MiB流式响应上限、MCP isError识别和安全错误码，提取前URL/DNS公网校验；Firecrawl检查目标statusCode，Exa无效条目不伪装成空结果。工具统一返回success/status/content，局部失败保留证据；不回显供应商原始错误。正文输出预留已请求原文预算，来源和摘录限量，长URL导致少展示来源时明确标partial且不抓不会展示的来源。read优先main/article、去导航/页脚，配图失败保留正文。整轮deadline包含排队；公开读取/原图共享2个并发槽，图片队列在途任务计入容量，热更新/卸载取消在途任务和清理元数据。RPC预算测试、SDK真实导入/执行测试覆盖，而非AST抽取业务方法。第三方远程提取的DNS/重定向安全仍由服务商负责，与本地固定IP下载边界不同。
 
 `public_http.py` 与 `neko-draw` 保持相同副本，独立安装时不互相依赖。修复下载安全逻辑时同步两份，并运行公网下载回归测试。

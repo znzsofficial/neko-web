@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — CI hardening
+
+- 新增8格GitHub回归：Ubuntu/Windows×Python3.12/3.14×最低SDK2.12/最新SDK；强制真实SDK、至少161项发现、仅白名单Windows权限skip允许。
+- Actions固定官方提交，只读权限；安全allowlist包构建及解压目录SDK导入冒烟、CI artifact留存14天，不自动发布或部署，不改变运行版本/既有供应商配置。
+
 ## [1.9.0]
 
 - 新增默认configured的manual_search_provider覆盖，仅手动普通/批量搜索可选Jina SERP，jina_search_engine指定google/bing；原search_provider继续供Life后台使用，专用领域仍AnySearch，不新增工具。
