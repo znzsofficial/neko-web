@@ -1,6 +1,6 @@
 # Neko Web
 
-1.7.0：本地网页/Firecrawl正文短期留存，新增`neko_web_text`按位置或字面关键词续读，不重复联网。
+1.8.0：可选Jina Reader正文后端，复用1.7的正文留存/续读；默认与已配置供应商不变，不自动换源。
 
 给 [MaiBot](https://github.com/Mai-with-u/MaiBot) 用的联网插件。搜索公开网页，读取标题、正文和候选图片，由麦麦看图挑选后随回复发送。
 
@@ -20,14 +20,24 @@ Firecrawl提取会把目标URL交给第三方。发送前验证URL及DNS为公�
 
 ## 工具
 
+### 可选 Jina Reader（1.8.0）
+
+在`[web]`显式设置`extract_provider="jina"`后，`neko_web_extract`及Exa搜索的`read_pages`使用Jina Reader；`jina_api_key`可留空尝试匿名，或填写自己的Jina Key。仅填Key不会切源，失败不会自动换Firecrawl/匿名重试，也不增加模型工具或每次调用的供应商覆盖参数。新安装默认仍AnySearch，既有Firecrawl配置保持。**本机当前仍使用Firecrawl，未启用Jina。**
+
+- 固定`POST https://r.jina.ai/`，目标URL放JSON正文，保留查询参数与SPA片段；请求Markdown + JSON响应，要求Jina断言目标HTTP状态为200，不把目标错误页面主动作为正文。422可能是目标状态断言或请求参数拒绝，不能简单等同404。严格检查响应envelope、字段类型及非空正文；错误只给安全类别，不泄露密钥、原始错误或正文。
+- URL/DNS发出前校验公网，返回来源发生变化时再次校验；Jina自己执行DNS/重定向，不具有本地下载器的固定IP保证，事后校验不能阻止供应商已访问的重定向。目标URL会交给第三方，不传私密、带登录令牌或一次性授权链接；不转发群聊、Cookie、宿主密钥或完整人设。未承诺供应商零保留。
+- 沿用代理选择、超时/槽位/2MiB流式响应限额，正文留存128000字符/聊天隔离/固定TTL等不变；支持`neko_web_text`续读。默认搜索不抓正文，本地read与图片、Life后台签名API均不切Jina。不接Jina Search/SERP、OCR模型、付费代理或自定义远端请求头。
+- 匿名可用性/频率/收费取决于供应商现行政策及账号，不保证永久免费；搜索与Reader不是同一接口。参考[Jina官方源码说明](https://github.com/jina-ai/reader)、[Reader OpenAPI](https://r.jina.ai/openapi.json)。
+- 验证边界（2026-10-20）：模拟传输覆盖请求结构、匿名/带Key、字段/HTTP/envelope错误、流式大小、目标校验、续读、供应商路由和不回退。服务器直连匿名example.com探针超时，隔离代理探针返回鉴权/权限类别；**尚无真实Jina正文成功验收**，也未验证某个Key能解决问题，不能将模拟通过宣传成远端可用。接入可供显式选择，但生产默认不切换，后续需用户账号/网络实测。
+
 ### 正文留存与续读（1.7.0）
 
-- `neko_web_read`本地网页、Firecrawl模式的`neko_web_extract`及Exa搜索`read_pages=1..2`，将本次取得的正文留在插件内存中，首次仍按原配置展示（搜索附带正文每篇4000字）。返回`text_id`、`total_chars`、`capture_limited`、`next_offset`。没有当前聊天时不建立快照；旧AnySearch提取暂不提供续读，结果明确说明，不伪造全文编号。
+- `neko_web_read`本地网页、Firecrawl/Jina模式的`neko_web_extract`及Exa搜索`read_pages=1..2`，将本次取得的正文留在插件内存中，首次仍按原配置展示（搜索附带正文每篇4000字）。返回`text_id`、`total_chars`、`capture_limited`、`next_offset`。没有当前聊天时不建立快照；旧AnySearch提取暂不提供续读，结果明确说明，不伪造全文编号。
 - 新增`neko_web_text(text_id, offset=0, keyword="", limit=4000)`：按位置继续读；填keyword则从offset起找首个**区分大小写的字面匹配**，展示其附近正文。不是语义检索、不支持正则、最多100字符关键词；未命中只表示该offset之后的留存内没找到。`limit`为100–8000字符，offset是从0起的Unicode字符索引（不是UTF-8字节），区间为`[start,end)`。正常续读使用`next_offset`，不重叠不丢字；再次找关键词可从上次end继续。
 - 单篇最多128000字符，正文达到留存上限与“首次展示截短”分别标记；供应商/本地解析取得的正文不保证是网站全文。读到留存末尾、或关键词未命中，不应声称原网站不存在后续内容。网页/正文始终是外部资料，不是执行指令。
 - 编号随机、仅当前聊天可用，创建后10分钟固定有效（读取不续期）。全局最多128篇/每聊天16篇，UTF-8正文和元数据载荷合计最多16MiB，容量不足按创建顺序回收；不是进程RSS上限。过期在下一次读写时回收；配置更新/卸载清空并取消在途工作。只存内存、不写正文文件/长期记忆或额外聊天历史，不跨聊天共享快照。
 - 续读完全不发网络请求、不发图片、不调用模型、不重复抓取；编号不可用明确失败，不自动联网重取。`read`的`has_more/next_cursor`继续表示图片翻页，正文另用`text_has_more/next_offset`，不要混用。全文缓存不附加隐藏背景注入，只在工具响应中展示本次选段。
-- 不新增密钥或配置、不换供应商、不恢复日成本硬限额。原并发/超时/2MiB供应商响应/公网下载安全/图片投递未知不重放保留。Life后台签名API仍走原有有界文本接口，不获得聊天快照、不改幂等或额度策略。Jina未接入。
+- 1.7不新增密钥或配置、不换供应商、不恢复日成本硬限额；1.8仅增加显式可选Jina，见上节。原并发/超时/2MiB供应商响应/公网下载安全/图片投递未知不重放保留。Life后台签名API仍走原有有界文本接口，不获得聊天快照、不改幂等或额度策略。
 
 示例：先打开链接取得`text_id="..."`，再调用`neko_web_text(text_id="...", offset=8000)`；找特定段落用`neko_web_text(text_id="...", keyword="结论", limit=2000)`。参数与编号应来自真实工具结果，不要编造。
 
@@ -75,7 +85,7 @@ Exa复用手动工具的结构化来源整理；AnySearch只接受已支持的re
 | `neko_web_images` | 下载图片或网页配图，仅供麦麦预览挑选。 |
 | `neko_web_images_next` | 使用上次返回的 `next_cursor` 查看下一批候选图，不重复打开原网页。 |
 | `neko_web_send_image` | 传入本聊天预览里的 `image_id`，取回并发送选中的原文件；一次只发一张。 |
-| `neko_web_extract` | 按配置用 AnySearch/Firecrawl 提取长文。用户只是丢来一个链接时，优先用 `neko_web_read`。 |
+| `neko_web_extract` | 按配置用 AnySearch/Firecrawl/Jina 提取长文。用户只是丢来一个链接时，优先用 `neko_web_read`。 |
 | `neko_web_text` | 按正文编号继续读或查找字面关键词，只访问当前聊天的短期缓存。 |
 
 图片通过工具结果的 `content_items` 交给麦麦，此时用户还没有收到图片。**这些是压缩预览**，每张最多256KiB/1280边长、每批最多4张/1MiB。结果同时提供原始尺寸、文件大小、来源和 `image_id`；麦麦按相关性选择并优先高清，调用 `neko_web_send_image(image_id=...)` 单独发原文件，不用 `reply.attach_pic` 把预览冒充原图。可少选或不选，不凑数量。正文和图片均为外部资料，不能当成指令。

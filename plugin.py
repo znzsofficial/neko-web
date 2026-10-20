@@ -18,7 +18,7 @@ from .images import IMAGE_HEADERS, FetchPolicy, ImageFetchError, image_urls_in_d
 from .page import read_public_page
 from .public_http import PublicClient
 from .preview import PreviewPager
-from .providers import ProviderError, extract_firecrawl_document, post_json, validate_remote_target
+from .providers import ProviderError, extract_firecrawl_document, extract_jina_document, post_json, validate_remote_target
 from .texts import MAX_SLICE_CHARS, TextRegistry, capture_document, text_result
 from .public_http import validate_url
 from .originals import OriginalRegistry
@@ -31,7 +31,7 @@ from .automation_retrieval import search_data, read_data
 
 
 ANYSEARCH_ENDPOINT = "https://api.anysearch.com/mcp"
-CLIENT_HEADER = "neko-web/1.7.0"
+CLIENT_HEADER = "neko-web/1.8.0"
 VERTICAL_DOMAINS = {
     "academic",
     "agriculture",
@@ -88,9 +88,11 @@ class WebConfig(PluginConfigBase):
     __ui_order__ = 1
 
     search_provider: Literal['anysearch', 'exa'] = Field(default='anysearch', description='普通搜索来源')
-    extract_provider: Literal['anysearch', 'firecrawl'] = Field(default='anysearch', description='长文提取来源')
+    extract_provider: Literal['anysearch', 'firecrawl', 'jina'] = Field(default='anysearch', description='长文提取来源；显式选择，不自动换源')
     exa_api_key: str = Field(default='', description='Exa API Key，仅存服务器配置')
     firecrawl_api_key: str = Field(default='', description='Firecrawl API Key，仅存服务器配置')
+    jina_api_key: str = Field(default='', description='Jina Reader API Key，可留空匿名；仅选择jina时使用',
+                              json_schema_extra={'label': 'Jina Reader 密钥（可选）'})
 
     api_key: str = Field(
         default="",
@@ -798,21 +800,25 @@ class NekoWebPlugin(MaiBotPlugin):
             return '原文状态：blocked_target；地址未通过公网URL校验。'
 
         config = self.config.web.model_copy(deep=True)
-        if config.extract_provider == 'firecrawl':
+        if config.extract_provider in {'firecrawl', 'jina'}:
+            label = 'Jina' if config.extract_provider == 'jina' else 'Firecrawl'
             try:
                 async with asyncio.timeout(65):
                     async with self._public_slots:
                         async with httpx.AsyncClient(timeout=config.timeout_seconds,
                                                      **self._build_client_options(config)) as client:
-                            document = await extract_firecrawl_document(client, config.firecrawl_api_key,
-                                                                        url, config.timeout_seconds)
+                            if config.extract_provider == 'jina':
+                                document = await extract_jina_document(client, config.jina_api_key, url, config.timeout_seconds)
+                            else:
+                                document = await extract_firecrawl_document(client, config.firecrawl_api_key,
+                                                                            url, config.timeout_seconds)
             except ProviderError as exc:
                 code, reason = error_status(exc)
-                return f'Firecrawl 原文状态：{code}；{reason}'
+                return f'{label} 原文状态：{code}；{reason}'
             except (AnySearchConfigError, ValueError, ImportError):
-                return 'Firecrawl 原文状态：config_error；代理配置无效。'
+                return f'{label} 原文状态：config_error；代理配置无效。'
             except TimeoutError:
-                return 'Firecrawl 原文状态：timeout；未取得完整正文，未自动重试。'
+                return f'{label} 原文状态：timeout；未取得完整正文，未自动重试。'
             result = self._document_result(document, scope, self._text_limit())
             images = image_urls_in_document(result['content'], url, limit=8)
             if images:

@@ -4,9 +4,10 @@ config_version = "1.0.0"
 
 [web]
 search_provider = "anysearch" # anysearch / exa
-extract_provider = "anysearch" # anysearch / firecrawl
+extract_provider = "anysearch" # anysearch / firecrawl / jina，不自动切换
 exa_api_key = ""
 firecrawl_api_key = ""
+jina_api_key = "" # 可留空匿名，仅选jina时使用；供应商额度/收费自行管理
 
 # AnySearch API Key（可选；留空使用匿名访问）
 api_key = ""
