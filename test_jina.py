@@ -114,6 +114,12 @@ class ReaderTests(IsolatedAsyncioTestCase):
                 with self.assertRaises(ProviderError):
                     await extract_jina_document(client, '', 'https://example.com/path?q=x#route', 20)
 
+    async def test_reported_target_http_status_not_ignored(self):
+        for target, code in [(404, 'page_error'), (True, 'invalid_response'), ('200', 'invalid_response')]:
+            with self.assertRaises(ProviderError) as ctx:
+                await self.call(httpx.Response(200, json=envelope(httpStatus=target)))
+            self.assertEqual(ctx.exception.code, code)
+
 
 class RoutingTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

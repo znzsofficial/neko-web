@@ -71,6 +71,53 @@ async def search_exa_results(client, key, query, count, filters=None):
     return results
 
 
+async def search_jina_results(client, key, query, count, engine):
+    """Observed hosted SERP contract, not the Reader repository's old API."""
+    if not key.strip():
+        raise ProviderError('未配置Jina搜索密钥', 'config_error')
+    if engine not in {'google', 'bing'} or type(count) is not int or not 1 <= count <= 10:
+        raise ProviderError('搜索参数无效', 'invalid_request')
+    try:
+        async with client.stream('GET', 'https://serp.jina.ai/',
+                params={'q': query, 'engine': engine, 'num': count},
+                headers={'Authorization': 'Bearer ' + key.strip(), 'Accept': 'application/json'},
+                follow_redirects=False) as response:
+            if response.status_code != 200:
+                raise ProviderError(f'HTTP {response.status_code}')
+            raw = bytearray()
+            async for chunk in response.aiter_bytes():
+                raw.extend(chunk)
+                if len(raw) > 2 * 1024 * 1024:
+                    raise ProviderError('响应过大')
+            data = json.loads(raw)
+    except httpx.TimeoutException:
+        raise ProviderError('请求超时') from None
+    except httpx.RequestError:
+        raise ProviderError('网络请求失败') from None
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        if isinstance(exc, ProviderError):
+            raise
+        raise ProviderError('响应格式无效') from None
+    if not isinstance(data, dict) or not isinstance(data.get('results'), list) or not isinstance(data.get('meta'), dict):
+        raise ProviderError('响应格式无效')
+    if data.get('error') or ('code' in data and data['code'] != 200):
+        raise ProviderError('响应格式无效')
+    meta = data['meta']
+    if meta.get('engine') != engine or meta.get('query') != query:
+        raise ProviderError('返回引擎或查询与请求不同', 'provider_contract_mismatch')
+    results = []
+    for item in data['results'][:100]:
+        if not isinstance(item, dict):
+            results.append(None)  # organize_results accounts for invalid entries.
+            continue
+        if item.get('engine', engine) != engine:
+            raise ProviderError('返回引擎与请求不同', 'provider_contract_mismatch')
+        results.append({'url': item.get('url'), 'title': item.get('title'),
+                        'publishedDate': item.get('date') if isinstance(item.get('date'), str) else '',
+                        'highlights': [item['snippet'][:1000]] if isinstance(item.get('snippet'), str) else []})
+    return results
+
+
 async def validate_remote_target(url):
     reason = validate_url(url)
     if reason:
@@ -147,6 +194,12 @@ async def extract_jina_document(client, key, url, request_seconds):
     if status != 20000 or not isinstance(data.get('data'), dict):
         raise ProviderError('响应格式无效')
     page = data['data']
+    target_status = page.get('httpStatus')
+    if target_status is not None:
+        if type(target_status) is not int:
+            raise ProviderError('响应格式无效')
+        if target_status != 200:
+            raise ProviderError('目标网页返回非成功状态', 'page_error')
     content, title, final_url = page.get('content'), page.get('title', ''), page.get('url', url)
     if not isinstance(content, str) or not isinstance(title, str) or not isinstance(final_url, str):
         raise ProviderError('响应格式无效')

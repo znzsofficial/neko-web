@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0]
+
+- 新增默认configured的manual_search_provider覆盖，仅手动普通/批量搜索可选Jina SERP，jina_search_engine指定google/bing；原search_provider继续供Life后台使用，专用领域仍AnySearch，不新增工具。
+- 按托管API实测使用q/engine/num与results/meta，拒绝实际引擎/查询不匹配、未知结构与安全错误，不盲传会400的type=web或被忽略的provider；复用来源整理与显式原文读取/续读，网站与日期筛选暂明确拒绝。
+- 可选jina_proxy_url只作用Jina Search/Reader，与Exa/Firecrawl/Life传输隔离，不自动配置或启用。Reader追加校验返回目标httpStatus（若存在）。
+- 真实Key经服务器隔离代理验收Google/Bing与Reader/续读；三问题小样本Bing中文出现完全无关来源，建议Exa保留默认、Google可选补充，不将样本或credits字段视为全面质量/价格保证。线上默认选择未改变。
+
 ## [1.8.0]
 
 - 新增显式可选`extract_provider="jina"`及可选`jina_api_key`，接Reader固定POST/JSON/Markdown端点，接入正文提取与Exa显式read_pages，复用聊天正文留存/续读。

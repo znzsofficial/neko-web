@@ -9,7 +9,7 @@ from functools import wraps
 
 def response_status(text):
     first_line = text.split('\n', 1)[0]
-    match = re.match(r'^(?:Exa 搜索|Firecrawl 原文|Jina 原文|AnySearch |搜索|原文)?状态：([a-z_]+)', first_line)
+    match = re.match(r'^(?:Exa 搜索|Jina SERP \((?:google|bing)\) 搜索|Firecrawl 原文|Jina 原文|AnySearch |搜索|原文)?状态：([a-z_]+)', first_line)
     if match:
         return match.group(1)
     if '未启用' in first_line:

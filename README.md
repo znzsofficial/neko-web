@@ -1,6 +1,6 @@
 # Neko Web
 
-1.8.0：可选Jina Reader正文后端，复用1.7的正文留存/续读；默认与已配置供应商不变，不自动换源。
+1.9.0：可选Jina SERP Google/Bing手动搜索，真实认证搜索/Reader与续读已验证；默认仍沿用原搜索配置，不改Life后台。
 
 给 [MaiBot](https://github.com/Mai-with-u/MaiBot) 用的联网插件。搜索公开网页，读取标题、正文和候选图片，由麦麦看图挑选后随回复发送。
 
@@ -20,6 +20,27 @@ Firecrawl提取会把目标URL交给第三方。发送前验证URL及DNS为公�
 
 ## 工具
 
+### 可选 Jina SERP 手动搜索（1.9.0）
+
+`web.manual_search_provider="configured"`默认沿用原`search_provider`。显式改为`"jina_serp"`后，仅普通/批量**手动工具**搜索用Jina SERP；`jina_search_engine="google"`（默认）或`"bing"`选择引擎，认证复用`jina_api_key`。专用领域仍AnySearch、Life后台仍使用原`search_provider`，不让手动选源顺带改变自主探索。
+
+- 固定`GET https://serp.jina.ai/`，只传实测可用的`q/engine/num`，只取标题、URL、snippet和可选日期，不默认抓正文。2026-10-20托管API实际为`{results,meta}`，`provider=bing`被忽略并返回google，`type=web`被400拒绝，与Reader仓库旧API文档不一致；因此不盲传旧参数、不兼容猜测未知响应结构。核对`meta.engine/meta.query`及逐项引擎，不符就明确失败，不静默接受、改写或跨源重试。
+- 返回结果复用URL去重、来源多样性、限长及缺失日期标记，不把摘要当事实或全文；返回引擎核对不保证供应商内部没有缓存/回退，新鲜度及实际收费仍未知。暂不支持sites/published_after/published_before，传入会在搜索前明确拒绝，不忽略或擅自拼进关键词。原read_pages=0–2仍是显式额外读正文，按已选extract后端执行/留存续读；局部失败保留搜索证据。
+- 新增`jina_proxy_url`：仅Jina Search/Reader可选专用HTTP(S)/SOCKS代理，留空沿用原代理。其他Exa/Firecrawl/AnySearch/Life配置不受影响；不得把Jina代理配置转发成供应商付费代理参数。新安装与现有部署不自动填代理、不切手动搜索来源；超时/并发/总期限/2MiB响应/未知不重放保留，无额外模型工具。
+- 小样本（3个公开问题、每家前3条、非统计性排名）：Google与Exa能找到技术/项目官方来源；中文航天样本Exa更贴题，Bing返回无关理财顾问结果。Jina返回的credits在本轮Google每次1、Bing每次2，只是供应商字段，不等于精确金额或永久价格。初步建议保留Exa默认、Google按需补充，Bing暂不推荐作为默认，不能声称全网比较胜出。
+- 已用服务器内配置Key经隔离代理真实验证两引擎和Reader，未把Key/配置写进Git或公开报告。原直连超时与匿名401记录仍有效，不宣称直连已恢复。线上仍保留原Exa＋Firecrawl，开启前需显式选手动来源及可用Jina网络路径。
+
+配置示例（自行填真实Key，代理按实际网络，不照抄他人地址）：
+
+```toml
+[web]
+search_provider = "exa"               # 原来源，Life后台保持使用
+manual_search_provider = "jina_serp"  # 仅手动普通/批量覆盖
+jina_search_engine = "google"
+jina_api_key = "YOUR_JINA_KEY"
+jina_proxy_url = ""                  # 留空沿用原代理；可单独指定Jina代理
+```
+
 ### 可选 Jina Reader（1.8.0）
 
 在`[web]`显式设置`extract_provider="jina"`后，`neko_web_extract`及Exa搜索的`read_pages`使用Jina Reader；`jina_api_key`可留空尝试匿名，或填写自己的Jina Key。仅填Key不会切源，失败不会自动换Firecrawl/匿名重试，也不增加模型工具或每次调用的供应商覆盖参数。新安装默认仍AnySearch，既有Firecrawl配置保持。**本机当前仍使用Firecrawl，未启用Jina。**
@@ -28,7 +49,7 @@ Firecrawl提取会把目标URL交给第三方。发送前验证URL及DNS为公�
 - URL/DNS发出前校验公网，返回来源发生变化时再次校验；Jina自己执行DNS/重定向，不具有本地下载器的固定IP保证，事后校验不能阻止供应商已访问的重定向。目标URL会交给第三方，不传私密、带登录令牌或一次性授权链接；不转发群聊、Cookie、宿主密钥或完整人设。未承诺供应商零保留。
 - 沿用代理选择、超时/槽位/2MiB流式响应限额，正文留存128000字符/聊天隔离/固定TTL等不变；支持`neko_web_text`续读。默认搜索不抓正文，本地read与图片、Life后台签名API均不切Jina。不接Jina Search/SERP、OCR模型、付费代理或自定义远端请求头。
 - 匿名可用性/频率/收费取决于供应商现行政策及账号，不保证永久免费；搜索与Reader不是同一接口。参考[Jina官方源码说明](https://github.com/jina-ai/reader)、[Reader OpenAPI](https://r.jina.ai/openapi.json)。
-- 验证边界（2026-10-20）：模拟传输覆盖请求结构、匿名/带Key、字段/HTTP/envelope错误、流式大小、目标校验、续读、供应商路由和不回退。服务器直连匿名example.com探针超时，隔离代理探针返回鉴权/权限类别；**尚无真实Jina正文成功验收**，也未验证某个Key能解决问题，不能将模拟通过宣传成远端可用。接入可供显式选择，但生产默认不切换，后续需用户账号/网络实测。
+- 验证边界（2026-10-20）：1.8匿名直连超时/隔离代理鉴权失败，未当成功；用户随后私下配置Key，1.9阶段服务器隔离代理实测Reader成功返回Example Domain标题及156字正文，关键词续读（禁网络）/跨聊天拒绝通过。最初QA错误要求正文含页面标题，断言失败后改核对标题和正文各自字段，未伪造第一次通过。现在还校验供应商返回的目标httpStatus（若有），错误目标不能当正文成功。真实认证成功仅限当次配置/代理和公开页面，不代表全部页面/直连/匿名已可用，生产默认仍不切换。
 
 ### 正文留存与续读（1.7.0）
 

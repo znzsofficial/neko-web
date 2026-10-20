@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import asyncio
 import json
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, List, Literal
 from urllib.parse import urlparse
@@ -31,7 +32,7 @@ from .automation_retrieval import search_data, read_data
 
 
 ANYSEARCH_ENDPOINT = "https://api.anysearch.com/mcp"
-CLIENT_HEADER = "neko-web/1.8.0"
+CLIENT_HEADER = "neko-web/1.9.0"
 VERTICAL_DOMAINS = {
     "academic",
     "agriculture",
@@ -88,6 +89,13 @@ class WebConfig(PluginConfigBase):
     __ui_order__ = 1
 
     search_provider: Literal['anysearch', 'exa'] = Field(default='anysearch', description='普通搜索来源')
+    manual_search_provider: Literal['configured', 'jina_serp'] = Field(
+        default='configured', description='仅普通/批量手动搜索覆盖；configured沿用搜索来源，Life后台不受影响',
+        json_schema_extra={'label': '手动搜索来源覆盖'})
+    jina_search_engine: Literal['google', 'bing'] = Field(default='google', description='Jina SERP搜索引擎，核对实际返回，不自动换源',
+                                                        json_schema_extra={'label': 'Jina搜索引擎'})
+    jina_proxy_url: str = Field(default='', description='可选Jina专用代理；留空沿用联网代理，不影响Exa/Firecrawl/Life',
+                                json_schema_extra={'label': 'Jina专用代理（可选）'})
     extract_provider: Literal['anysearch', 'firecrawl', 'jina'] = Field(default='anysearch', description='长文提取来源；显式选择，不自动换源')
     exa_api_key: str = Field(default='', description='Exa API Key，仅存服务器配置')
     firecrawl_api_key: str = Field(default='', description='Firecrawl API Key，仅存服务器配置')
@@ -261,10 +269,14 @@ class NekoWebPlugin(MaiBotPlugin):
         except Exception:
             return {'success': False, 'status': 'unavailable'}
 
-    def _build_client_options(self, config=None) -> dict[str, Any]:
+    def _build_client_options(self, config=None, *, jina=False) -> dict[str, Any]:
         """根据配置构造 httpx 客户端代理参数。"""
 
         config = config or self.config.web
+        if jina and config.jina_proxy_url.strip():
+            config = config.model_copy(deep=True)
+            config.proxy_mode = 'custom'
+            config.proxy_url = config.jina_proxy_url.strip()
         if config.proxy_mode == "none":
             return {"trust_env": False}
         if config.proxy_mode == "system":
@@ -414,23 +426,34 @@ class NekoWebPlugin(MaiBotPlugin):
 
     async def _provider_search(self, query, count, filters=None, read_pages=0, *, deadline=None, scope=''):
         config = self.config.web.model_copy(deep=True)
-        if config.search_provider == 'anysearch':
+        backend = 'jina_serp' if config.manual_search_provider == 'jina_serp' else 'exa'
+        label = f'Jina SERP ({config.jina_search_engine})' if backend == 'jina_serp' else 'Exa'
+        if backend == 'jina_serp' and filters:
+            return '搜索状态：unsupported；Jina SERP暂不支持网站/发布日期筛选，未忽略参数或发起请求。'
+        if config.search_provider == 'anysearch' and backend != 'jina_serp':
             if filters or read_pages:
                 return '搜索状态：unsupported；时间/网站筛选和搜索后读原文需使用Exa，未忽略参数或额外请求。'
             return await self._call_api('search', {'query': query, 'max_results': count})
         try:
-            async with httpx.AsyncClient(timeout=config.timeout_seconds,
-                                         **self._build_client_options(config)) as client:
-                return await retrieve(client, config, query, count, filters or {}, read_pages,
-                                      min(config.max_text_chars, 4000), deadline=deadline,
+            async with AsyncExitStack() as stack:
+                client = await stack.enter_async_context(httpx.AsyncClient(timeout=config.timeout_seconds,
+                                                                          **self._build_client_options(config)))
+                jina_client = client
+                if backend == 'jina_serp' or (read_pages and config.extract_provider == 'jina'):
+                    jina_client = await stack.enter_async_context(httpx.AsyncClient(timeout=config.timeout_seconds,
+                                                                                   **self._build_client_options(config, jina=True)))
+                return await retrieve(jina_client if backend == 'jina_serp' else client,
+                                      config, query, count, filters or {}, read_pages,
+                                      min(config.max_text_chars, 4000), deadline=deadline, backend=backend,
+                                      body_client=jina_client if config.extract_provider == 'jina' else client,
                                       render_document=lambda doc, limit: self._document_result(doc, scope, limit)['content'])
         except ProviderError as exc:
             code, reason = error_status(exc)
-            return f'Exa 搜索状态：{code}；{reason}'
+            return f'{label} 搜索状态：{code}；{reason}'
         except (AnySearchConfigError, httpx.InvalidURL, ValueError, ImportError):
-            return 'Exa 搜索状态：config_error；代理配置无效，请检查配置。'
+            return f'{label} 搜索状态：config_error；代理配置无效，请检查配置。'
         except TimeoutError:
-            return 'Exa 搜索状态：timeout；整轮检索超过期限，可能已有请求计费，未自动重试。'
+            return f'{label} 搜索状态：timeout；整轮检索超过期限，可能已有请求计费，未自动重试。'
 
     @Tool(
         "neko_web_search",
@@ -806,7 +829,7 @@ class NekoWebPlugin(MaiBotPlugin):
                 async with asyncio.timeout(65):
                     async with self._public_slots:
                         async with httpx.AsyncClient(timeout=config.timeout_seconds,
-                                                     **self._build_client_options(config)) as client:
+                                                     **self._build_client_options(config, jina=config.extract_provider == 'jina')) as client:
                             if config.extract_provider == 'jina':
                                 document = await extract_jina_document(client, config.jina_api_key, url, config.timeout_seconds)
                             else:
