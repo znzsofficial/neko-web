@@ -37,7 +37,8 @@ class PreviewTests(IsolatedAsyncioTestCase):
     async def test_page_keeps_text_and_candidate_media(self):
         self.plugin._pager.batch = AsyncMock(return_value=([self.image], [], '', 0, False))
         with patch.object(plugin, 'read_public_page', AsyncMock(return_value=SimpleNamespace(
-                title='Article', text='Body', images=[self.image], candidates=[], candidates_limited=False))):
+                title='Article', text='Body', captured_text='Body', capture_limited=False,
+                images=[self.image], candidates=[], candidates_limited=False))):
             result = await self.plugin.handle_read('https://example.com/article', stream_id='test')
         self.assertIn('Body', result['content'])
         self.assertEqual(len(result['content_items']), 1)
@@ -46,7 +47,8 @@ class PreviewTests(IsolatedAsyncioTestCase):
     async def test_read_keeps_body_when_images_timeout(self):
         self.plugin._pager.batch = AsyncMock(side_effect=TimeoutError)
         with patch.object(plugin, 'read_public_page', AsyncMock(return_value=SimpleNamespace(
-                title='Article', text='Body', images=[], candidates=[], candidates_limited=False))):
+                title='Article', text='Body', captured_text='Body', capture_limited=False,
+                images=[], candidates=[], candidates_limited=False))):
             result = await self.plugin.handle_read('https://example.com/article', stream_id='test')
         self.assertIn('Body', result['content'])
         self.assertEqual(result['status'], 'partial')

@@ -7,11 +7,11 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 try:
     from .public_http import validate_url
-    from .providers import ProviderError, extract_firecrawl, search_exa_results
+    from .providers import ProviderError, extract_firecrawl, extract_firecrawl_document, search_exa_results
     from .runtime import Deadline, bounded_text, response_status
 except ImportError:
     from public_http import validate_url
-    from providers import ProviderError, extract_firecrawl, search_exa_results
+    from providers import ProviderError, extract_firecrawl, extract_firecrawl_document, search_exa_results
     from runtime import Deadline, bounded_text, response_status
 
 MAX_SEARCH_CONCURRENCY = 2
@@ -124,13 +124,14 @@ async def search_sources(client, config, query, count, filters, *, deadline=None
     return sources, stats
 
 
-async def retrieve(client, config, query, count, filters, read_pages=0, body_limit=4000, *, deadline=None):
+async def retrieve(client, config, query, count, filters, read_pages=0, body_limit=4000, *, deadline=None,
+                   render_document=None):
     if isinstance(read_pages, bool) or not isinstance(read_pages, int) or not 0 <= read_pages <= MAX_READ_PAGES:
         raise ProviderError('原文数量无效')
     deadline = deadline or Deadline.after(95)
     sources, stats = await search_sources(client, config, query, count, filters, deadline=deadline)
     body_limit = min(body_limit, MAX_BODY_CHARS)
-    search_budget = MAX_SEARCH_OUTPUT - read_pages * (body_limit + 512) - 512
+    search_budget = MAX_SEARCH_OUTPUT - read_pages * (body_limit + 1200) - 512
     visible, metadata_blocks, used = [], [], 0
     for source in sources:
         metadata = f'{len(visible) + 1}. {source["title"][:100]}\n{source["url"]}\n来源：{source["source"]}\n发布日期：{source["published"] or "未提供（不代表最新）"}'
@@ -166,9 +167,14 @@ async def retrieve(client, config, query, count, filters, read_pages=0, body_lim
             if remaining < 1:
                 raise TimeoutError
             async with asyncio.timeout(min(remaining, config.timeout_seconds)):
-                body = await extract_firecrawl(client, config.firecrawl_api_key, source['url'],
-                                               body_limit, min(config.timeout_seconds, remaining), include_source=False)
-            lines.append('状态：ok\n' + bounded_text(body, body_limit + 400))
+                if render_document is None:
+                    body = await extract_firecrawl(client, config.firecrawl_api_key, source['url'],
+                                                   body_limit, min(config.timeout_seconds, remaining), include_source=False)
+                else:
+                    document = await extract_firecrawl_document(client, config.firecrawl_api_key, source['url'],
+                                                               min(config.timeout_seconds, remaining))
+                    body = render_document(document, body_limit)
+            lines.append('状态：ok\n' + bounded_text(body, body_limit + 1100))
         except ProviderError as exc:
             failed += 1
             code, reason = error_status(exc)

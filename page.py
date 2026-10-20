@@ -21,6 +21,7 @@ try:
         sniff_image,
         decode_image,
     )
+    from .texts import MAX_CAPTURE_CHARS
 except ImportError:
     from images import (
         CANDIDATES_PER_PAGE,
@@ -34,6 +35,7 @@ except ImportError:
         sniff_image,
         decode_image,
     )
+    from texts import MAX_CAPTURE_CHARS
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ class PageRead:
     notes: list[str]
     candidates: list[str] = field(default_factory=list)
     candidates_limited: bool = False
+    captured_text: str = ''
+    capture_limited: bool = False
 
 
 class _TextExtractor(HTMLParser):
@@ -177,6 +181,7 @@ async def read_public_page(
     max_image_bytes: int = 8 * 1024 * 1024,
     text_limit: int = 8000,
     preview_only: bool = False,
+    capture_text: bool = False,
 ) -> PageRead:
     """打开一个公开地址，读取正文并下载其中的图片。"""
 
@@ -192,7 +197,11 @@ async def read_public_page(
     mime = sniff_image(data)
     if mime:
         return PageRead(final, "", "", [await decode_image(data, final)], [])
-    title, text = page_text(data, content_type, text_limit)
+    title, text = page_text(data, content_type, MAX_CAPTURE_CHARS + 1 if capture_text else text_limit)
+    captured = text[:MAX_CAPTURE_CHARS] if capture_text else ''
+    capture_limited = capture_text and len(text) > MAX_CAPTURE_CHARS
+    if capture_text and len(text) > text_limit:
+        text = text[:text_limit] + '\n…（正文已截断）'
     images: list[FetchedImage] = []
     notes: list[str] = []
     candidates: list[str] = []
@@ -204,4 +213,4 @@ async def read_public_page(
         candidates = candidates[:CANDIDATES_PER_PAGE]
         if not preview_only:
             await download_candidate_images(client, candidates, active, images, notes)
-    return PageRead(final, title, text, images, notes, candidates, limited)
+    return PageRead(final, title, text, images, notes, candidates, limited, captured, capture_limited)

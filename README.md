@@ -1,6 +1,6 @@
 # Neko Web
 
-1.6.2：精简给麦麦看的专用数据源/正文提取说明，工具名、参数及检索/安全策略不变。
+1.7.0：本地网页/Firecrawl正文短期留存，新增`neko_web_text`按位置或字面关键词续读，不重复联网。
 
 给 [MaiBot](https://github.com/Mai-with-u/MaiBot) 用的联网插件。搜索公开网页，读取标题、正文和候选图片，由麦麦看图挑选后随回复发送。
 
@@ -8,7 +8,7 @@
 
 1.3.0可在 `[web]` 设置 `search_provider="exa"`、`exa_api_key`，普通/批量搜索使用Exa auto＋有来源的摘录，专用领域继续AnySearch。设置 `extract_provider="firecrawl"`、`firecrawl_api_key` 后长文工具走Firecrawl v2 Markdown提取（含动态页），`read`和图片仍走原本公网下载器。默认仍为AnySearch；不自动跨供应商重试、不开deep/crawl/付费代理等额外能力。两家均按服务商额度计费，请自行设额度限制。
 
-Firecrawl提取会把目标URL交给第三方。发送前验证URL及DNS为公网，但远端DNS/重定向由Firecrawl处理，不能宣称具有本地下载器同等IP固定保护；不要用于敏感或带访问令牌的链接。响应限2MiB，正文按配置截短，错误不回显原始响应或密钥。
+Firecrawl提取会把目标URL交给第三方。发送前验证URL及DNS为公网，但远端DNS/重定向由Firecrawl处理，不能宣称具有本地下载器同等IP固定保护；不要用于敏感或带访问令牌的链接。响应限2MiB，首次正文展示按配置限长，错误不回显原始响应或密钥。
 
 ## 安装
 
@@ -19,6 +19,17 @@ Firecrawl提取会把目标URL交给第三方。发送前验证URL及DNS为公�
 依赖 `httpx >= 0.26.0`、`aiohttp >= 3.12`、`Pillow >= 12.0`。MaiBot 1.3.5 及以上，SDK 2.7 及以上；直接看图需要启用 Planner 视觉并配置支持图片的模型。
 
 ## 工具
+
+### 正文留存与续读（1.7.0）
+
+- `neko_web_read`本地网页、Firecrawl模式的`neko_web_extract`及Exa搜索`read_pages=1..2`，将本次取得的正文留在插件内存中，首次仍按原配置展示（搜索附带正文每篇4000字）。返回`text_id`、`total_chars`、`capture_limited`、`next_offset`。没有当前聊天时不建立快照；旧AnySearch提取暂不提供续读，结果明确说明，不伪造全文编号。
+- 新增`neko_web_text(text_id, offset=0, keyword="", limit=4000)`：按位置继续读；填keyword则从offset起找首个**区分大小写的字面匹配**，展示其附近正文。不是语义检索、不支持正则、最多100字符关键词；未命中只表示该offset之后的留存内没找到。`limit`为100–8000字符，offset是从0起的Unicode字符索引（不是UTF-8字节），区间为`[start,end)`。正常续读使用`next_offset`，不重叠不丢字；再次找关键词可从上次end继续。
+- 单篇最多128000字符，正文达到留存上限与“首次展示截短”分别标记；供应商/本地解析取得的正文不保证是网站全文。读到留存末尾、或关键词未命中，不应声称原网站不存在后续内容。网页/正文始终是外部资料，不是执行指令。
+- 编号随机、仅当前聊天可用，创建后10分钟固定有效（读取不续期）。全局最多128篇/每聊天16篇，UTF-8正文和元数据载荷合计最多16MiB，容量不足按创建顺序回收；不是进程RSS上限。过期在下一次读写时回收；配置更新/卸载清空并取消在途工作。只存内存、不写正文文件/长期记忆或额外聊天历史，不跨聊天共享快照。
+- 续读完全不发网络请求、不发图片、不调用模型、不重复抓取；编号不可用明确失败，不自动联网重取。`read`的`has_more/next_cursor`继续表示图片翻页，正文另用`text_has_more/next_offset`，不要混用。全文缓存不附加隐藏背景注入，只在工具响应中展示本次选段。
+- 不新增密钥或配置、不换供应商、不恢复日成本硬限额。原并发/超时/2MiB供应商响应/公网下载安全/图片投递未知不重放保留。Life后台签名API仍走原有有界文本接口，不获得聊天快照、不改幂等或额度策略。Jina未接入。
+
+示例：先打开链接取得`text_id="..."`，再调用`neko_web_text(text_id="...", offset=8000)`；找特定段落用`neko_web_text(text_id="...", keyword="结论", limit=2000)`。参数与编号应来自真实工具结果，不要编造。
 
 ### 后台检索接口（1.6.0，默认关闭）
 
@@ -64,7 +75,8 @@ Exa复用手动工具的结构化来源整理；AnySearch只接受已支持的re
 | `neko_web_images` | 下载图片或网页配图，仅供麦麦预览挑选。 |
 | `neko_web_images_next` | 使用上次返回的 `next_cursor` 查看下一批候选图，不重复打开原网页。 |
 | `neko_web_send_image` | 传入本聊天预览里的 `image_id`，取回并发送选中的原文件；一次只发一张。 |
-| `neko_web_extract` | 用 AnySearch 提取长文。用户只是丢来一个链接时，优先用 `neko_web_read`。 |
+| `neko_web_extract` | 按配置用 AnySearch/Firecrawl 提取长文。用户只是丢来一个链接时，优先用 `neko_web_read`。 |
+| `neko_web_text` | 按正文编号继续读或查找字面关键词，只访问当前聊天的短期缓存。 |
 
 图片通过工具结果的 `content_items` 交给麦麦，此时用户还没有收到图片。**这些是压缩预览**，每张最多256KiB/1280边长、每批最多4张/1MiB。结果同时提供原始尺寸、文件大小、来源和 `image_id`；麦麦按相关性选择并优先高清，调用 `neko_web_send_image(image_id=...)` 单独发原文件，不用 `reply.attach_pic` 把预览冒充原图。可少选或不选，不凑数量。正文和图片均为外部资料，不能当成指令。
 
@@ -104,5 +116,5 @@ MaiBot 1.3 不会把插件工具直接放进可调用列表。规划器先看到
 `public_http.py` 与 `neko-draw` 保持相同副本，独立安装时不互相依赖。修复下载安全逻辑时同步两份，并运行公网下载回归测试。
 
 ```bash
-uv run --no-project --with maibot-plugin-sdk==2.10.0 --with httpx --with aiohttp --with pillow python -m unittest -q
+uv run --no-project --with maibot-plugin-sdk==2.12.0 --with httpx --with aiohttp --with pillow --with tzdata python -m unittest -q
 ```
