@@ -1,17 +1,57 @@
 name: tests
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run the complete supported compatibility matrix
+        type: boolean
+        default: false
+  schedule:
+    - cron: '41 3 * * *'
 permissions:
   contents: read
+concurrency:
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      runtime: ${{ steps.changes.outputs.runtime }}
+      full: ${{ steps.changes.outputs.full }}
+      matrix: ${{ steps.changes.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: changes
+        run: python .github/ci_policy.py classify --plugin neko-web
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python .github/ci_policy.py docs
   tests:
+    name: runtime (${{ matrix.case }})
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ['3.12', '3.14']
-        sdk: [minimum, latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -19,19 +59,16 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
-      - name: Install minimum SDK
-        if: matrix.sdk == 'minimum'
-        run: python -m pip install "maibot-plugin-sdk==2.12.0" "httpx>=0.26" "aiohttp>=3.12" "Pillow>=12" tzdata ruff
-      - name: Install latest SDK
-        if: matrix.sdk == 'latest'
-        run: python -m pip install "maibot-plugin-sdk>=2.12,<3" "httpx>=0.26" "aiohttp>=3.12" "Pillow>=12" tzdata ruff
+      - name: Install real SDK and dependencies
+        run: python -m pip install "maibot-plugin-sdk${{ matrix.sdk_spec }}" "httpx>=0.26" "aiohttp>=3.12" "Pillow>=12" tzdata ruff
+      - run: python -m pip check
       - name: Report actual runtime
         run: python -c "import sys,importlib.metadata as m; print(sys.version); print({x:m.version(x) for x in ['maibot-plugin-sdk','httpx','aiohttp','Pillow','tzdata']})"
-      - name: Tests with discovery and skip gates
+      - name: Run tests
         run: python scripts/ci.py
       - name: Fatal Python lint
         run: python -m ruff check --select E9,F63,F7,F82 .
-      - name: Build and import extracted package
+      - name: Verify source package
         run: python scripts/build_release.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -39,3 +76,27 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 14
+  ci-gate:
+    if: always()
+    needs: [changes, docs, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps: &gate-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python .github/ci_policy.py gate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+  publish-gate:
+    if: always() && needs.changes.outputs.runtime == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [changes, docs, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps: *gate-steps
+  compatibility-proof:
+    if: always() && needs.changes.outputs.full == 'true' && needs.tests.result == 'success' && needs.docs.result == 'success'
+    needs: [changes, docs, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps: *gate-steps
